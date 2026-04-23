@@ -5,23 +5,55 @@
 
 	<modelVersion>4.0.0</modelVersion>
 
-	<groupId>com.top_logic.tools</groupId>
+	<groupId>com.top-logic</groupId>
 	<artifactId>tl-mcp-server</artifactId>
 	<version>0.1.0-SNAPSHOT</version>
-	<packaging>jar</packaging>
+	<packaging>maven-plugin</packaging>
 
 	<name>TopLogic MCP Server</name>
-	<description>Local MCP server exposing TopLogic class/type/TL-Script indexes to AI agents.</description>
+	<description>Maven plugin that serves MCP tools exposing TopLogic class/type indexes of a workspace module's compile classpath.</description>
 
 	<properties>
 		<maven.compiler.source>17</maven.compiler.source>
 		<maven.compiler.target>17</maven.compiler.target>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+		<maven.version>3.9.6</maven.version>
+		<maven.plugin.tools.version>3.13.1</maven.plugin.tools.version>
 		<mcp.sdk.version>1.1.1</mcp.sdk.version>
-		<exec.mainClass>com.top_logic.tools.mcp.Main</exec.mainClass>
+		<tl.version>8.0.0-SNAPSHOT</tl.version>
 	</properties>
 
+	<prerequisites>
+		<maven>3.6.0</maven>
+	</prerequisites>
+
 	<dependencies>
+		<dependency>
+			<groupId>org.apache.maven</groupId>
+			<artifactId>maven-plugin-api</artifactId>
+			<version>${maven.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.maven</groupId>
+			<artifactId>maven-core</artifactId>
+			<version>${maven.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.maven.plugin-tools</groupId>
+			<artifactId>maven-plugin-annotations</artifactId>
+			<version>${maven.plugin.tools.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>com.top-logic</groupId>
+			<artifactId>tl-xref</artifactId>
+			<version>${tl.version}</version>
+		</dependency>
+
 		<dependency>
 			<groupId>io.modelcontextprotocol.sdk</groupId>
 			<artifactId>mcp</artifactId>
@@ -32,11 +64,11 @@
 	<build>
 		<plugins>
 			<plugin>
-				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>exec-maven-plugin</artifactId>
-				<version>3.5.0</version>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-plugin-plugin</artifactId>
+				<version>${maven.plugin.tools.version}</version>
 				<configuration>
-					<mainClass>${exec.mainClass}</mainClass>
+					<goalPrefix>tl-mcp</goalPrefix>
 				</configuration>
 			</plugin>
 		</plugins>
