@@ -22,12 +22,17 @@ import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.plugins.annotations.ResolutionScope;
 import org.apache.maven.project.MavenProject;
+import org.eclipse.jetty.ee10.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee10.servlet.ServletHolder;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.ServerConnector;
 
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpServerFeatures.SyncToolSpecification;
 import io.modelcontextprotocol.server.McpSyncServer;
+import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTransportProvider;
 import io.modelcontextprotocol.server.transport.StdioServerTransportProvider;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
@@ -57,6 +62,21 @@ public class ServeMojo extends AbstractMojo {
 
 	@Parameter(defaultValue = "${session}", readonly = true, required = true)
 	private MavenSession _session;
+
+	/**
+	 * TCP port to serve the MCP endpoint over HTTP. A value {@code <= 0} (default) keeps the
+	 * server on stdio transport.
+	 */
+	@Parameter(property = "tl-mcp.port", defaultValue = "0")
+	private int _httpPort;
+
+	/** Bind address for HTTP transport. */
+	@Parameter(property = "tl-mcp.host", defaultValue = "127.0.0.1")
+	private String _httpHost;
+
+	/** URL path of the MCP endpoint when using HTTP transport. */
+	@Parameter(property = "tl-mcp.path", defaultValue = "/mcp")
+	private String _httpPath;
 
 	@Override
 	public void execute() throws MojoExecutionException {
@@ -90,7 +110,38 @@ public class ServeMojo extends AbstractMojo {
 			+ _project.getId() + (failed > 0 ? ", " + failed + " unresolved" : "") + ")");
 
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();
+
+		if (_httpPort > 0) {
+			runHttp(graph, jsonMapper);
+		} else {
+			runStdio(graph, jsonMapper);
+		}
+	}
+
+	private void runStdio(TypeGraph graph, McpJsonMapper jsonMapper) {
 		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
+		McpSyncServer server = McpServer.sync(transport)
+			.serverInfo("tl-mcp-server", "0.1.0")
+			.capabilities(McpSchema.ServerCapabilities.builder()
+				.tools(false)
+				.build())
+			.build();
+
+		registerTools(server, jsonMapper, graph);
+
+		try {
+			Thread.currentThread().join();
+		} catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private void runHttp(TypeGraph graph, McpJsonMapper jsonMapper) throws MojoExecutionException {
+		HttpServletStreamableServerTransportProvider transport =
+			HttpServletStreamableServerTransportProvider.builder()
+				.jsonMapper(jsonMapper)
+				.mcpEndpoint(_httpPath)
+				.build();
 
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
@@ -99,17 +150,42 @@ public class ServeMojo extends AbstractMojo {
 				.build())
 			.build();
 
+		registerTools(server, jsonMapper, graph);
+
+		Server jetty = new Server();
+		ServerConnector connector = new ServerConnector(jetty);
+		connector.setHost(_httpHost);
+		connector.setPort(_httpPort);
+		jetty.addConnector(connector);
+
+		ServletContextHandler context = new ServletContextHandler(ServletContextHandler.NO_SESSIONS);
+		context.setContextPath("/");
+		ServletHolder holder = new ServletHolder(transport);
+		holder.setAsyncSupported(true);
+		context.addServlet(holder, "/*");
+		jetty.setHandler(context);
+
+		try {
+			jetty.start();
+		} catch (Exception ex) {
+			throw new MojoExecutionException("Failed to start HTTP server on " + _httpHost + ":" + _httpPort, ex);
+		}
+
+		getLog().info("tl-mcp-server: listening on http://" + _httpHost + ":" + _httpPort + _httpPath);
+
+		try {
+			jetty.join();
+		} catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private static void registerTools(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph) {
 		server.addTool(findType(jsonMapper, graph));
 		server.addTool(subtypesOf(jsonMapper, graph));
 		server.addTool(supertypesOf(jsonMapper, graph));
 		server.addTool(implementorsOf(jsonMapper, graph));
 		server.addTool(annotatedWith(jsonMapper, graph));
-
-		try {
-			Thread.currentThread().join();
-		} catch (InterruptedException ex) {
-			Thread.currentThread().interrupt();
-		}
 	}
 
 	private static SyncToolSpecification findType(McpJsonMapper json, TypeGraph graph) {
