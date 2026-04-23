@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -208,6 +210,54 @@ public class TypeGraph {
 			}
 		}
 		return result;
+	}
+
+	/**
+	 * Search indexed type names.
+	 *
+	 * @param query
+	 *        Pattern to match. If {@code regex} is {@code true}, a Java {@link Pattern} matched
+	 *        against the full FQN; otherwise a case-insensitive substring.
+	 * @param regex
+	 *        Whether {@code query} is a regular expression.
+	 * @param limit
+	 *        Maximum number of results; {@code <= 0} means unlimited.
+	 * @return Sorted list of FQNs that matched, truncated to {@code limit}.
+	 */
+	public List<String> search(String query, boolean regex, int limit) {
+		if (query == null || query.isEmpty()) {
+			return List.of();
+		}
+		Pattern pattern;
+		String needle;
+		if (regex) {
+			try {
+				pattern = Pattern.compile(query);
+			} catch (PatternSyntaxException ex) {
+				throw new IllegalArgumentException("Invalid regex: " + ex.getMessage(), ex);
+			}
+			needle = null;
+		} else {
+			pattern = null;
+			needle = query.toLowerCase();
+		}
+		List<String> hits = new ArrayList<>();
+		for (String fqn : _types.keySet()) {
+			boolean match = pattern != null ? pattern.matcher(fqn).find() : fqn.toLowerCase().contains(needle);
+			if (match) {
+				hits.add(fqn);
+			}
+		}
+		Collections.sort(hits);
+		if (limit > 0 && hits.size() > limit) {
+			return hits.subList(0, limit);
+		}
+		return hits;
+	}
+
+	/** Total count of FQNs matching the given search (without limit). */
+	public int searchCount(String query, boolean regex) {
+		return search(query, regex, -1).size();
 	}
 
 	/** All types carrying the given annotation (FQN of the annotation class). */

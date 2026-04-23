@@ -182,10 +182,65 @@ public class ServeMojo extends AbstractMojo {
 
 	private static void registerTools(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph) {
 		server.addTool(findType(jsonMapper, graph));
+		server.addTool(searchTypes(jsonMapper, graph));
 		server.addTool(subtypesOf(jsonMapper, graph));
 		server.addTool(supertypesOf(jsonMapper, graph));
 		server.addTool(implementorsOf(jsonMapper, graph));
 		server.addTool(annotatedWith(jsonMapper, graph));
+	}
+
+	private static SyncToolSpecification searchTypes(McpJsonMapper json, TypeGraph graph) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "query": {
+			      "type": "string",
+			      "description": "Substring (case-insensitive) matched against each FQN, or a Java regex when 'regex' is true."
+			    },
+			    "regex": {
+			      "type": "boolean",
+			      "description": "Interpret 'query' as a Java regular expression matched (Matcher#find) against the FQN.",
+			      "default": false
+			    },
+			    "limit": {
+			      "type": "integer",
+			      "description": "Maximum number of matches to return. 0 or negative means unlimited. Default 100.",
+			      "default": 100
+			    }
+			  },
+			  "required": ["query"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("search_types")
+				.description("Search indexed type names. Returns FQNs sorted alphabetically. Use this for fuzzy discovery; for exact name lookup prefer find_type.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler((exchange, request) -> {
+				String query = stringArg(request.arguments(), "query");
+				boolean regex = boolArg(request.arguments(), "regex", false);
+				int limit = intArg(request.arguments(), "limit", 100);
+				List<String> matches;
+				try {
+					matches = graph.search(query, regex, limit);
+				} catch (IllegalArgumentException ex) {
+					return CallToolResult.builder()
+						.isError(true)
+						.content(List.of(new McpSchema.TextContent(ex.getMessage())))
+						.build();
+				}
+				int total = (limit > 0 && matches.size() == limit) ? graph.searchCount(query, regex) : matches.size();
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("query", query);
+				result.put("regex", regex);
+				result.put("total", total);
+				result.put("truncated", total > matches.size());
+				result.put("matches", matches);
+				return jsonResult(json, result);
+			})
+			.build();
 	}
 
 	private static SyncToolSpecification findType(McpJsonMapper json, TypeGraph graph) {
@@ -195,7 +250,7 @@ public class ServeMojo extends AbstractMojo {
 			  "properties": {
 			    "name": {
 			      "type": "string",
-			      "description": "Fully qualified class name, or a simple name to search by suffix."
+			      "description": "Fully qualified class name, or a bare simple name."
 			    }
 			  },
 			  "required": ["name"]
@@ -204,7 +259,7 @@ public class ServeMojo extends AbstractMojo {
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("find_type")
-				.description("Look up type metadata. Accepts a fully qualified name, or a simple name in which case all types whose FQN ends with that name are returned.")
+				.description("Look up type metadata by exact name. If an FQN is given, returns that one type. If a bare simple name (no '.') is given, returns every type whose simple class name is exactly that (matching on '.' or '$' boundaries — a name like 'Component' will not match 'LayoutComponent'). For substring or pattern search across FQNs, use search_types.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler((exchange, request) -> {
@@ -369,6 +424,21 @@ public class ServeMojo extends AbstractMojo {
 			return b;
 		}
 		return Boolean.parseBoolean(value.toString());
+	}
+
+	private static int intArg(Map<String, Object> args, String key, int defaultValue) {
+		Object value = args.get(key);
+		if (value == null) {
+			return defaultValue;
+		}
+		if (value instanceof Number n) {
+			return n.intValue();
+		}
+		try {
+			return Integer.parseInt(value.toString());
+		} catch (NumberFormatException ex) {
+			return defaultValue;
+		}
 	}
 
 	private static CallToolResult jsonResult(McpJsonMapper json, Object payload) {
