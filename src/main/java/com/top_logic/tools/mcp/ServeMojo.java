@@ -8,9 +8,13 @@ package com.top_logic.tools.mcp;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
+import org.apache.maven.artifact.DependencyResolutionRequiredException;
+import org.apache.maven.execution.MavenSession;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
@@ -41,6 +45,7 @@ import io.modelcontextprotocol.spec.McpSchema.Tool;
  */
 @Mojo(
 	name = "serve",
+	aggregator = true,
 	defaultPhase = LifecyclePhase.NONE,
 	requiresDependencyResolution = ResolutionScope.COMPILE,
 	threadSafe = true,
@@ -50,25 +55,39 @@ public class ServeMojo extends AbstractMojo {
 	@Parameter(defaultValue = "${project}", readonly = true, required = true)
 	private MavenProject _project;
 
-	@Parameter(defaultValue = "${project.compileClasspathElements}", readonly = true, required = true)
-	private List<String> _classpathElements;
+	@Parameter(defaultValue = "${session}", readonly = true, required = true)
+	private MavenSession _session;
 
 	@Override
 	public void execute() throws MojoExecutionException {
-		List<File> classpath = new ArrayList<>(_classpathElements.size());
-		for (String element : _classpathElements) {
-			classpath.add(new File(element));
+		Set<File> classpath = new LinkedHashSet<>();
+		List<MavenProject> projects = _session.getProjects();
+		int failed = 0;
+		for (MavenProject project : projects) {
+			File outputDir = new File(project.getBuild().getOutputDirectory());
+			if (outputDir.isDirectory()) {
+				classpath.add(outputDir);
+			}
+			try {
+				for (String element : project.getCompileClasspathElements()) {
+					classpath.add(new File(element));
+				}
+			} catch (DependencyResolutionRequiredException ex) {
+				failed++;
+				getLog().warn("Skipping classpath of " + project.getId() + ": " + ex.getMessage());
+			}
 		}
 
 		TypeGraph graph;
 		try {
-			graph = TypeGraph.load(classpath);
+			graph = TypeGraph.load(new ArrayList<>(classpath));
 		} catch (Exception ex) {
 			throw new MojoExecutionException("Failed to load type index from classpath.", ex);
 		}
 
 		getLog().info("tl-mcp-server: indexed " + graph.size() + " types from "
-			+ classpath.size() + " classpath entries of " + _project.getId());
+			+ classpath.size() + " classpath entries across " + projects.size() + " reactor module(s) (root: "
+			+ _project.getId() + (failed > 0 ? ", " + failed + " unresolved" : "") + ")");
 
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();
 		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
