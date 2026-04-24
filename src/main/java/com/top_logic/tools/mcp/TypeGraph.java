@@ -808,8 +808,22 @@ public class TypeGraph {
 			// Fall back to the full source; the member line info is missing (no debug attribute).
 			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
 		}
-		int ctx = Math.max(0, contextLines);
-		int from = Math.max(1, m.startLine() - ctx);
+		int from;
+		if (contextLines >= 0) {
+			from = Math.max(1, m.startLine() - contextLines);
+		} else {
+			// Auto: anchor at the previous member's closing line + 1. The resulting gap contains
+			// the javadoc + annotations + signature belonging to this member. For the first
+			// member in the class, start at line 1 (package/imports/class-level javadoc).
+			int prevEnd = 0;
+			for (MethodInfo other : info.methods()) {
+				if (other == m) continue;
+				int end = other.endLine();
+				if (end <= 0 || end >= m.startLine()) continue;
+				if (end > prevEnd) prevEnd = end;
+			}
+			from = prevEnd > 0 ? prevEnd + 1 : 1;
+		}
 		int to = Math.min(lines.size(), m.endLine() + 1);
 		String text = String.join("\n", lines.subList(from - 1, to));
 		return new SourceResult(entry, text, from, to, lines.size());

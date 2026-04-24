@@ -410,7 +410,7 @@ public final class McpTools {
 			    "fqn": {"type": "string", "description": "FQN of the declaring type."},
 			    "member": {"type": "string", "description": "Optional method name ('<init>' for constructors); omit to return the full source file."},
 			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor to disambiguate overloaded methods."},
-			    "context_lines": {"type": "integer", "default": 30, "description": "Leading context lines (javadoc, annotations) to include before the member header."}
+			    "context_lines": {"type": "integer", "default": -1, "description": "Leading context lines before the member's first executable line. A negative value (default) activates auto-mode: the snippet starts right after the previous member's closing line, which contains exactly the javadoc + annotations + signature attached to this member. Pass a non-negative value for a fixed-size window instead."}
 			  },
 			  "required": ["fqn"]
 			}
@@ -418,7 +418,7 @@ public final class McpTools {
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("show_source")
-				.description("Returns the Java source of a type or one of its methods. Pulls from the reactor module's src/main/java or from the companion -sources.jar of an external dependency. JavaDoc is captured naturally by the leading context. Fields and methods without line info fall back to the full source file with text set to the whole class.")
+				.description("Returns the Java source of a type or one of its methods. Pulls from the reactor module's src/main/java or from the companion -sources.jar of an external dependency. By default, auto-context anchors the snippet at the previous member's end line, so the leading block (javadoc + annotations + signature) belongs exactly to the queried member. Fields and methods without line info fall back to the full source file.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler(safe((exchange, request) -> {
@@ -426,7 +426,7 @@ public final class McpTools {
 				String fqn = stringArg(args, "fqn");
 				String member = nullableStringArg(args, "member");
 				String descriptor = nullableStringArg(args, "descriptor");
-				int ctx = intArg(args, "context_lines", 30);
+				int ctx = intArg(args, "context_lines", -1);
 				try {
 					TypeGraph.SourceResult r = graph.sourceOf(fqn, member, descriptor, ctx);
 					Map<String, Object> result = new LinkedHashMap<>();
