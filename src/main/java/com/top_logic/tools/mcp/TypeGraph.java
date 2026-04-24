@@ -804,13 +804,31 @@ public class TypeGraph {
 		}
 
 		MethodInfo m = findMethod(info, member, descriptor);
-		if (m == null || m.startLine() <= 0) {
-			// Fall back to the full source; the member line info is missing (no debug attribute).
+		if (m == null) {
 			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
 		}
+
+		int startLine = m.startLine();
+		int endLine = m.endLine();
+		int textSearchFrom = -1;
+		if (startLine <= 0) {
+			// No LineNumberTable — typical for abstract / interface methods. Fall back to a text
+			// search: find the declaration line, walk up through the attached javadoc /
+			// annotation / blank lines, and down to the terminator (';' or '{').
+			int[] range = findByTextSearch(lines, member, descriptor);
+			if (range == null) {
+				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+			}
+			textSearchFrom = range[0];
+			startLine = range[1];
+			endLine = range[2];
+		}
+
 		int from;
 		if (contextLines >= 0) {
-			from = Math.max(1, m.startLine() - contextLines);
+			from = Math.max(1, startLine - contextLines);
+		} else if (textSearchFrom > 0) {
+			from = textSearchFrom;
 		} else {
 			// Auto: anchor at the previous member's closing line + 1. The resulting gap contains
 			// the javadoc + annotations + signature belonging to this member. For the first
@@ -819,14 +837,94 @@ public class TypeGraph {
 			for (MethodInfo other : info.methods()) {
 				if (other == m) continue;
 				int end = other.endLine();
-				if (end <= 0 || end >= m.startLine()) continue;
+				if (end <= 0 || end >= startLine) continue;
 				if (end > prevEnd) prevEnd = end;
 			}
 			from = prevEnd > 0 ? prevEnd + 1 : 1;
 		}
-		int to = Math.min(lines.size(), m.endLine() + 1);
+		int to = Math.min(lines.size(), endLine + 1);
 		String text = String.join("\n", lines.subList(from - 1, to));
 		return new SourceResult(entry, text, from, to, lines.size());
+	}
+
+	/**
+	 * Text-search fallback for abstract / interface methods whose bytecode carries no line info.
+	 * Returns {@code [headerFromLine, declarationLine, endLine]} (1-based, inclusive) where
+	 * {@code headerFromLine} is the first line of the attached javadoc / annotation / blank
+	 * block preceding the declaration. Returns {@code null} when the member is not found.
+	 */
+	private static int[] findByTextSearch(List<String> lines, String member, String descriptor) {
+		int expectedParams = -1;
+		if (descriptor != null && !descriptor.isEmpty()) {
+			try {
+				expectedParams = org.objectweb.asm.Type.getArgumentTypes(descriptor).length;
+			} catch (RuntimeException ignore) {
+				// leave as -1
+			}
+		}
+		Pattern declPattern = Pattern.compile("\\b" + Pattern.quote(member) + "\\s*\\(");
+		int declLine = -1;
+		for (int i = 0; i < lines.size(); i++) {
+			String line = lines.get(i);
+			if (!declPattern.matcher(line).find()) continue;
+			if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
+			if (expectedParams >= 0 && paramCount(lines, i) != expectedParams) continue;
+			declLine = i + 1;
+			break;
+		}
+		if (declLine < 0) return null;
+
+		int endLine = declLine;
+		for (int j = declLine - 1; j < lines.size(); j++) {
+			String line = lines.get(j);
+			if (line.contains(";") || line.contains("{")) {
+				endLine = j + 1;
+				break;
+			}
+		}
+		// Walk up over javadoc/annotation/blank lines that belong to this declaration.
+		int headerFrom = declLine;
+		for (int k = declLine - 2; k >= 0; k--) {
+			String trimmed = lines.get(k).trim();
+			if (trimmed.isEmpty()
+				|| trimmed.startsWith("//")
+				|| trimmed.startsWith("/**") || trimmed.startsWith("/*")
+				|| trimmed.startsWith("*")
+				|| trimmed.endsWith("*/")
+				|| trimmed.startsWith("@")) {
+				headerFrom = k + 1;
+			} else {
+				break;
+			}
+		}
+		return new int[] { headerFrom, declLine, endLine };
+	}
+
+	/**
+	 * Counts comma-separated parameter slots in the parenthesised argument list starting on
+	 * {@code startIdx}. Bracket-balanced so that nested generics ({@code Map<K, V>}) do not
+	 * inflate the count. Returns -1 if the parentheses are unbalanced across visible lines.
+	 */
+	private static int paramCount(List<String> lines, int startIdx) {
+		int depth = 0;
+		boolean seenOpen = false;
+		int params = 0;
+		boolean nonEmpty = false;
+		int angle = 0;
+		for (int i = startIdx; i < lines.size() && i < startIdx + 20; i++) {
+			String line = lines.get(i);
+			for (int k = 0; k < line.length(); k++) {
+				char c = line.charAt(k);
+				if (c == '(') { depth++; seenOpen = true; continue; }
+				if (c == ')') { depth--; if (depth == 0) return nonEmpty ? params + 1 : 0; continue; }
+				if (!seenOpen || depth != 1) continue;
+				if (c == '<') angle++;
+				else if (c == '>') angle--;
+				else if (c == ',' && angle == 0) params++;
+				else if (!Character.isWhitespace(c)) nonEmpty = true;
+			}
+		}
+		return -1;
 	}
 
 	private static MethodInfo findMethod(TypeInfo info, String member, String descriptor) {
