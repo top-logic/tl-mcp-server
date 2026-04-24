@@ -8,10 +8,8 @@ package com.top_logic.tools.mcp;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.execution.MavenSession;
@@ -39,14 +37,8 @@ import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
 /**
- * Maven plugin goal that starts an MCP stdio server exposing the {@link TypeGraph} of the current
- * project's compile classpath.
- *
- * <p>
- * Intended for use by AI agents: invoke via <code>mvn com.top-logic:tl-mcp-server:serve</code> in
- * the target workspace module. Maven resolves the compile classpath, from which the plugin reads
- * all <code>TypeIndex.json</code> resources and serves queries over stdio.
- * </p>
+ * Maven plugin goal that starts an MCP server (stdio or HTTP) exposing the {@link TypeGraph} built
+ * from the reactor's compile classpath.
  */
 @Mojo(
 	name = "serve",
@@ -63,42 +55,44 @@ public class ServeMojo extends AbstractMojo {
 	@Parameter(defaultValue = "${session}", readonly = true, required = true)
 	private MavenSession _session;
 
-	/**
-	 * TCP port to serve the MCP endpoint over HTTP. A value {@code <= 0} (default) keeps the
-	 * server on stdio transport.
-	 */
+	/** TCP port for HTTP transport. {@code <= 0} keeps the server on stdio. */
 	@Parameter(property = "tl-mcp.port", defaultValue = "0")
 	private int _httpPort;
 
-	/** Bind address for HTTP transport. */
 	@Parameter(property = "tl-mcp.host", defaultValue = "127.0.0.1")
 	private String _httpHost;
 
-	/** URL path of the MCP endpoint when using HTTP transport. */
 	@Parameter(property = "tl-mcp.path", defaultValue = "/mcp")
 	private String _httpPath;
 
-	/**
-	 * Whether to also index JDK system modules (jrt:/). Adds tens of thousands of types and a
-	 * few seconds of startup time; useful if queries against {@code java.*}/{@code javax.*}
-	 * types are wanted.
-	 */
+	/** Index JDK system modules (jrt:/) in addition to the classpath. Off by default. */
 	@Parameter(property = "tl-mcp.jdk", defaultValue = "false")
 	private boolean _includeJdk;
 
+	/**
+	 * Scan method bodies to populate the call graph, field-access graph, and string-literal
+	 * index. Adds ~2–3× to startup time; enable when those queries are needed.
+	 */
+	@Parameter(property = "tl-mcp.bodies", defaultValue = "true")
+	private boolean _scanBodies;
+
 	@Override
 	public void execute() throws MojoExecutionException {
-		Set<File> classpath = new LinkedHashSet<>();
+		List<BytecodeScanner.Source> classpath = new ArrayList<>();
+		List<File> seen = new ArrayList<>();
 		List<MavenProject> projects = _session.getProjects();
 		int failed = 0;
 		for (MavenProject project : projects) {
 			File outputDir = new File(project.getBuild().getOutputDirectory());
-			if (outputDir.isDirectory()) {
-				classpath.add(outputDir);
+			if (outputDir.isDirectory() && addOnce(seen, outputDir)) {
+				classpath.add(new BytecodeScanner.Source(outputDir, project.getId()));
 			}
 			try {
 				for (String element : project.getCompileClasspathElements()) {
-					classpath.add(new File(element));
+					File f = new File(element);
+					if (addOnce(seen, f)) {
+						classpath.add(new BytecodeScanner.Source(f, null));
+					}
 				}
 			} catch (DependencyResolutionRequiredException ex) {
 				failed++;
@@ -108,15 +102,16 @@ public class ServeMojo extends AbstractMojo {
 
 		TypeGraph graph;
 		try {
-			graph = TypeGraph.load(new ArrayList<>(classpath), _includeJdk);
+			graph = TypeGraph.load(classpath, _includeJdk, _scanBodies);
 		} catch (Exception ex) {
-			throw new MojoExecutionException("Failed to load type index from classpath.", ex);
+			throw new MojoExecutionException("Failed to build type graph from classpath.", ex);
 		}
 
 		getLog().info("tl-mcp-server: indexed " + graph.size() + " types from "
 			+ classpath.size() + " classpath entries across " + projects.size() + " reactor module(s)"
-			+ (_includeJdk ? " (+JDK)" : "") + " (root: "
-			+ _project.getId() + (failed > 0 ? ", " + failed + " unresolved" : "") + ")");
+			+ (_includeJdk ? " (+JDK)" : "")
+			+ (_scanBodies ? " (bodies)" : " (no bodies)")
+			+ " (root: " + _project.getId() + (failed > 0 ? ", " + failed + " unresolved" : "") + ")");
 
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();
 
@@ -127,17 +122,21 @@ public class ServeMojo extends AbstractMojo {
 		}
 	}
 
+	private static boolean addOnce(List<File> seen, File f) {
+		for (File prev : seen) {
+			if (prev.equals(f)) return false;
+		}
+		seen.add(f);
+		return true;
+	}
+
 	private void runStdio(TypeGraph graph, McpJsonMapper jsonMapper) {
 		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
-			.capabilities(McpSchema.ServerCapabilities.builder()
-				.tools(false)
-				.build())
+			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
-
 		registerTools(server, jsonMapper, graph);
-
 		try {
 			Thread.currentThread().join();
 		} catch (InterruptedException ex) {
@@ -151,14 +150,10 @@ public class ServeMojo extends AbstractMojo {
 				.jsonMapper(jsonMapper)
 				.mcpEndpoint(_httpPath)
 				.build();
-
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
-			.capabilities(McpSchema.ServerCapabilities.builder()
-				.tools(false)
-				.build())
+			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
-
 		registerTools(server, jsonMapper, graph);
 
 		Server jetty = new Server();
@@ -192,71 +187,38 @@ public class ServeMojo extends AbstractMojo {
 	private static void registerTools(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph) {
 		server.addTool(queryTypes(jsonMapper, graph));
 		server.addTool(describeType(jsonMapper, graph));
+		server.addTool(listMembers(jsonMapper, graph));
+		server.addTool(referencesTo(jsonMapper, graph));
+		server.addTool(callersOf(jsonMapper, graph));
+		server.addTool(fieldAccessors(jsonMapper, graph));
+		server.addTool(moduleOf(jsonMapper, graph));
 	}
+
+	// ---------- Tools ----------
 
 	private static SyncToolSpecification queryTypes(McpJsonMapper json, TypeGraph graph) {
 		String schema = """
 			{
 			  "type": "object",
 			  "properties": {
-			    "name": {
-			      "type": "string",
-			      "description": "Exact-match filter: an FQN returns only that type; a bare simple name (no '.') returns every type whose simple class name equals it exactly (anchored at '.' or '$' boundaries)."
-			    },
-			    "pattern": {
-			      "type": "string",
-			      "description": "Substring filter (case-insensitive) against the full FQN. Combined with 'regex=true' it is interpreted as a Java regex matched via Matcher#find."
-			    },
-			    "regex": {
-			      "type": "boolean",
-			      "description": "Interpret 'pattern' as a Java regular expression.",
-			      "default": false
-			    },
-			    "subtype_of": {
-			      "type": "string",
-			      "description": "FQN of a base type; restrict results to its (transitive) specializations."
-			    },
-			    "supertype_of": {
-			      "type": "string",
-			      "description": "FQN of a type; restrict results to its (transitive) generalizations (ancestors)."
-			    },
-			    "direct_only": {
-			      "type": "boolean",
-			      "description": "When 'subtype_of' or 'supertype_of' is given, restrict to direct relations (no transitivity).",
-			      "default": false
-			    },
-			    "annotated_with": {
-			      "type": "array",
-			      "items": {"type": "string"},
-			      "description": "Type must carry every listed annotation (by FQN)."
-			    },
-			    "kind": {
-			      "type": "string",
-			      "enum": ["any", "class", "interface", "concrete"],
-			      "description": "'class' = non-interface (may be abstract); 'concrete' = not abstract and not interface.",
-			      "default": "any"
-			    },
-			    "public_only": {
-			      "type": "boolean",
-			      "description": "Exclude non-public types. Default true.",
-			      "default": true
-			    },
-			    "limit": {
-			      "type": "integer",
-			      "description": "Maximum number of matches to return. 0 or negative means unlimited. Default 100.",
-			      "default": 100
-			    }
+			    "name": {"type": "string", "description": "Exact-match filter: FQN or bare simple name (anchored at '.' or '$')."},
+			    "pattern": {"type": "string", "description": "Substring (case-insensitive) against the full FQN, or regex if 'regex' is true."},
+			    "regex": {"type": "boolean", "default": false},
+			    "subtype_of": {"type": "string", "description": "FQN; restrict to (transitive) specializations."},
+			    "supertype_of": {"type": "string", "description": "FQN; restrict to (transitive) generalizations."},
+			    "direct_only": {"type": "boolean", "default": false},
+			    "annotated_with": {"type": "array", "items": {"type": "string"}, "description": "Require every listed annotation."},
+			    "in_module": {"type": "string", "description": "Restrict to a module/JAR id ('groupId:artifactId[:version]' or a Maven project id)."},
+			    "kind": {"type": "string", "enum": ["any", "class", "interface", "concrete", "enum", "annotation"], "default": "any"},
+			    "public_only": {"type": "boolean", "default": true},
+			    "limit": {"type": "integer", "default": 100}
 			  }
 			}
 			""";
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("query_types")
-				.description("Query the indexed Java type graph. All filters are optional and AND-combined: "
-					+ "'name'/'pattern' narrow by name, 'subtype_of'/'supertype_of' walk the hierarchy, "
-					+ "'annotated_with' requires annotations, 'kind' restricts class vs. interface vs. concrete. "
-					+ "Returns a sorted list of FQNs with total count and a 'truncated' flag. "
-					+ "For full metadata of a single type, use describe_type.")
+				.description("Filter the type index. All filters optional, AND-combined. Returns sorted FQNs with total count and a 'truncated' flag.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler((exchange, request) -> {
@@ -270,6 +232,7 @@ public class ServeMojo extends AbstractMojo {
 						nullableStringArg(args, "supertype_of"),
 						boolArg(args, "direct_only", false),
 						stringListArg(args, "annotated_with"),
+						nullableStringArg(args, "in_module"),
 						kindArg(args, "kind"),
 						boolArg(args, "public_only", true),
 						intArg(args, "limit", 100));
@@ -280,10 +243,7 @@ public class ServeMojo extends AbstractMojo {
 					result.put("matches", r.matches());
 					return jsonResult(json, result);
 				} catch (IllegalArgumentException ex) {
-					return CallToolResult.builder()
-						.isError(true)
-						.content(List.of(new McpSchema.TextContent(ex.getMessage())))
-						.build();
+					return errorResult(ex.getMessage());
 				}
 			})
 			.build();
@@ -294,10 +254,7 @@ public class ServeMojo extends AbstractMojo {
 			{
 			  "type": "object",
 			  "properties": {
-			    "fqn": {
-			      "type": "string",
-			      "description": "Fully qualified name of the type."
-			    }
+			    "fqn": {"type": "string", "description": "Fully qualified name of the type."}
 			  },
 			  "required": ["fqn"]
 			}
@@ -305,7 +262,7 @@ public class ServeMojo extends AbstractMojo {
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("describe_type")
-				.description("Full metadata of a single type by FQN: public/interface/abstract flags, direct supertypes, annotations, and (for TL configuration types) paired configuration/implementation FQNs. Returns null-ish if the FQN is unknown.")
+				.description("Metadata of a single type by FQN: modifiers, superclass, interfaces, enclosing outer class, module, source file, annotations (with parsed parameter values), and method/field counts. For the member list call list_members.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler((exchange, request) -> {
@@ -324,74 +281,256 @@ public class ServeMojo extends AbstractMojo {
 			.build();
 	}
 
+	private static SyncToolSpecification listMembers(McpJsonMapper json, TypeGraph graph) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "fqn": {"type": "string"}
+			  },
+			  "required": ["fqn"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("list_members")
+				.description("All declared methods and fields of a type: names, signatures (descriptor, return/parameter/exception types), modifiers (public/static/abstract/final), annotations with parsed parameter values, and field constant values. Inherited members are not included — call on each supertype separately.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler((exchange, request) -> {
+				String fqn = stringArg(request.arguments(), "fqn");
+				Map<String, Object> desc = graph.describeMembers(fqn);
+				Map<String, Object> result = new LinkedHashMap<>();
+				if (desc == null) {
+					result.put("found", false);
+					result.put("fqn", fqn);
+				} else {
+					result.put("found", true);
+					result.putAll(desc);
+				}
+				return jsonResult(json, result);
+			})
+			.build();
+	}
+
+	private static SyncToolSpecification referencesTo(McpJsonMapper json, TypeGraph graph) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "fqn": {"type": "string"},
+			    "limit": {"type": "integer", "default": 200}
+			  },
+			  "required": ["fqn"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("references_to")
+				.description("Types that reference the given FQN: superclasses/interfaces, annotations, method and field signatures, and (when body scan is enabled) types touched from method bodies. Use for 'find usages at type level'.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler((exchange, request) -> {
+				String fqn = stringArg(request.arguments(), "fqn");
+				int limit = intArg(request.arguments(), "limit", 200);
+				List<String> refs = graph.referencesTo(fqn);
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("target", fqn);
+				result.put("total", refs.size());
+				boolean truncated = limit > 0 && refs.size() > limit;
+				result.put("truncated", truncated);
+				result.put("referenced_by", truncated ? refs.subList(0, limit) : refs);
+				return jsonResult(json, result);
+			})
+			.build();
+	}
+
+	private static SyncToolSpecification callersOf(McpJsonMapper json, TypeGraph graph) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "owner": {"type": "string", "description": "FQN of the class declaring the method."},
+			    "method": {"type": "string", "description": "Method name (or '<init>' for constructors)."},
+			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor (e.g. '(Ljava/lang/String;)I'); omit to match all overloads."},
+			    "limit": {"type": "integer", "default": 200}
+			  },
+			  "required": ["owner", "method"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("callers_of")
+				.description("Call sites that invoke the given method. Requires body scan (tl-mcp.bodies=true, the default). Results are exact per bytecode descriptor: a call to a method declared on a supertype is recorded against that supertype, not its overriding subclass.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler((exchange, request) -> {
+				String owner = stringArg(request.arguments(), "owner");
+				String method = stringArg(request.arguments(), "method");
+				String descriptor = nullableStringArg(request.arguments(), "descriptor");
+				int limit = intArg(request.arguments(), "limit", 200);
+				List<TypeGraph.CallerRef> callers = graph.callersOf(owner, method, descriptor);
+				List<Map<String, Object>> out = new ArrayList<>();
+				for (TypeGraph.CallerRef ref : callers) {
+					Map<String, Object> e = new LinkedHashMap<>();
+					e.put("type", ref.ownerType());
+					e.put("method", ref.method());
+					e.put("descriptor", ref.descriptor());
+					out.add(e);
+				}
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("owner", owner);
+				result.put("method", method);
+				if (descriptor != null) result.put("descriptor", descriptor);
+				result.put("total", out.size());
+				boolean truncated = limit > 0 && out.size() > limit;
+				result.put("truncated", truncated);
+				result.put("callers", truncated ? out.subList(0, limit) : out);
+				return jsonResult(json, result);
+			})
+			.build();
+	}
+
+	private static SyncToolSpecification fieldAccessors(McpJsonMapper json, TypeGraph graph) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "owner": {"type": "string"},
+			    "field": {"type": "string"},
+			    "mode": {"type": "string", "enum": ["read", "write", "any"], "default": "any"},
+			    "limit": {"type": "integer", "default": 200}
+			  },
+			  "required": ["owner", "field"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("field_accessors")
+				.description("Methods that read or write a field (from bytecode). Requires body scan. 'mode' selects reads, writes, or both.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler((exchange, request) -> {
+				String owner = stringArg(request.arguments(), "owner");
+				String field = stringArg(request.arguments(), "field");
+				String mode = nullableStringArg(request.arguments(), "mode");
+				int limit = intArg(request.arguments(), "limit", 200);
+				boolean wantRead = mode == null || "any".equalsIgnoreCase(mode) || "read".equalsIgnoreCase(mode);
+				boolean wantWrite = mode == null || "any".equalsIgnoreCase(mode) || "write".equalsIgnoreCase(mode);
+				List<Map<String, Object>> out = new ArrayList<>();
+				if (wantRead) {
+					for (TypeGraph.AccessorRef r : graph.fieldReaders(owner, field)) {
+						Map<String, Object> e = new LinkedHashMap<>();
+						e.put("type", r.ownerType());
+						e.put("method", r.method());
+						e.put("descriptor", r.descriptor());
+						e.put("mode", "read");
+						out.add(e);
+					}
+				}
+				if (wantWrite) {
+					for (TypeGraph.AccessorRef r : graph.fieldWriters(owner, field)) {
+						Map<String, Object> e = new LinkedHashMap<>();
+						e.put("type", r.ownerType());
+						e.put("method", r.method());
+						e.put("descriptor", r.descriptor());
+						e.put("mode", "write");
+						out.add(e);
+					}
+				}
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("owner", owner);
+				result.put("field", field);
+				result.put("total", out.size());
+				boolean truncated = limit > 0 && out.size() > limit;
+				result.put("truncated", truncated);
+				result.put("accessors", truncated ? out.subList(0, limit) : out);
+				return jsonResult(json, result);
+			})
+			.build();
+	}
+
+	private static SyncToolSpecification moduleOf(McpJsonMapper json, TypeGraph graph) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "fqn": {"type": "string"}
+			  },
+			  "required": ["fqn"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("module_of")
+				.description("Returns the Maven module id (or JAR GAV / filename) that supplied the given class. Useful for dependency-graph questions like 'which JAR brings this class in?'.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler((exchange, request) -> {
+				String fqn = stringArg(request.arguments(), "fqn");
+				String module = graph.moduleOf(fqn);
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("fqn", fqn);
+				result.put("found", module != null);
+				if (module != null) result.put("module", module);
+				return jsonResult(json, result);
+			})
+			.build();
+	}
+
+	// ---------- Argument helpers ----------
+
 	private static String stringArg(Map<String, Object> args, String key) {
-		Object value = args.get(key);
-		return value == null ? "" : value.toString();
+		Object v = args.get(key);
+		return v == null ? "" : v.toString();
 	}
 
 	private static String nullableStringArg(Map<String, Object> args, String key) {
-		Object value = args.get(key);
-		if (value == null) {
-			return null;
-		}
-		String text = value.toString();
-		return text.isEmpty() ? null : text;
+		Object v = args.get(key);
+		if (v == null) return null;
+		String t = v.toString();
+		return t.isEmpty() ? null : t;
 	}
 
 	private static List<String> stringListArg(Map<String, Object> args, String key) {
-		Object value = args.get(key);
-		if (value == null) {
-			return List.of();
-		}
-		if (value instanceof List<?> list) {
+		Object v = args.get(key);
+		if (v == null) return List.of();
+		if (v instanceof List<?> list) {
 			List<String> out = new ArrayList<>(list.size());
 			for (Object element : list) {
-				if (element != null) {
-					out.add(element.toString());
-				}
+				if (element != null) out.add(element.toString());
 			}
 			return out;
 		}
-		return List.of(value.toString());
+		return List.of(v.toString());
 	}
 
 	private static TypeGraph.Kind kindArg(Map<String, Object> args, String key) {
-		Object value = args.get(key);
-		if (value == null) {
-			return TypeGraph.Kind.ANY;
-		}
-		String text = value.toString().trim().toUpperCase();
-		if (text.isEmpty()) {
-			return TypeGraph.Kind.ANY;
-		}
+		Object v = args.get(key);
+		if (v == null) return TypeGraph.Kind.ANY;
+		String t = v.toString().trim().toUpperCase();
+		if (t.isEmpty()) return TypeGraph.Kind.ANY;
 		try {
-			return TypeGraph.Kind.valueOf(text);
+			return TypeGraph.Kind.valueOf(t);
 		} catch (IllegalArgumentException ex) {
-			throw new IllegalArgumentException("Invalid kind '" + value + "'; expected one of any/class/interface/concrete.");
+			throw new IllegalArgumentException("Invalid kind '" + v
+				+ "'; expected one of any/class/interface/concrete/enum/annotation.");
 		}
 	}
 
 	private static boolean boolArg(Map<String, Object> args, String key, boolean defaultValue) {
-		Object value = args.get(key);
-		if (value == null) {
-			return defaultValue;
-		}
-		if (value instanceof Boolean b) {
-			return b;
-		}
-		return Boolean.parseBoolean(value.toString());
+		Object v = args.get(key);
+		if (v == null) return defaultValue;
+		if (v instanceof Boolean b) return b;
+		return Boolean.parseBoolean(v.toString());
 	}
 
 	private static int intArg(Map<String, Object> args, String key, int defaultValue) {
-		Object value = args.get(key);
-		if (value == null) {
-			return defaultValue;
-		}
-		if (value instanceof Number n) {
-			return n.intValue();
-		}
+		Object v = args.get(key);
+		if (v == null) return defaultValue;
+		if (v instanceof Number n) return n.intValue();
 		try {
-			return Integer.parseInt(value.toString());
+			return Integer.parseInt(v.toString());
 		} catch (NumberFormatException ex) {
 			return defaultValue;
 		}
@@ -404,11 +543,15 @@ public class ServeMojo extends AbstractMojo {
 				.content(List.of(new McpSchema.TextContent(text)))
 				.build();
 		} catch (Exception ex) {
-			return CallToolResult.builder()
-				.isError(true)
-				.content(List.of(new McpSchema.TextContent("Serialization failure: " + ex.getMessage())))
-				.build();
+			return errorResult("Serialization failure: " + ex.getMessage());
 		}
+	}
+
+	private static CallToolResult errorResult(String message) {
+		return CallToolResult.builder()
+			.isError(true)
+			.content(List.of(new McpSchema.TextContent(message)))
+			.build();
 	}
 
 }

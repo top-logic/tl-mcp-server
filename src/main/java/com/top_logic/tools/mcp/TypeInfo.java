@@ -6,22 +6,15 @@
 package com.top_logic.tools.mcp;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
+
+import org.objectweb.asm.Opcodes;
 
 /**
- * Metadata about a single indexed type, built from class-file bytecode by
- * {@link BytecodeScanner}.
- *
- * <p>
- * The {@link #configuration} / {@link #implementation} fields pair a TopLogic
- * {@link com.top_logic.basic.config.ConfigurationItem}-style config interface with its runtime
- * implementation class. They are reconstructed from the presence of a constructor with signature
- * {@code (InstantiationContext, Config)} — if such a constructor exists on {@code Impl}, then
- * {@code Impl.configuration == Config} and {@code Config.implementation == Impl}. Non-TopLogic
- * classes simply leave both fields {@code null}.
- * </p>
+ * Metadata about a single indexed type, built from class-file bytecode by {@link BytecodeScanner}.
  */
 public final class TypeInfo {
 
@@ -30,93 +23,164 @@ public final class TypeInfo {
 
 	private final String _name;
 
-	private final boolean _isPublic;
+	private final int _access;
 
-	private final boolean _isInterface;
+	private final String _superclass;
 
-	private final boolean _isAbstract;
+	private final List<String> _interfaces;
 
-	private final List<String> _supertypes;
+	private final String _enclosing;
 
-	private final Set<String> _annotations;
+	private final String _moduleId;
+
+	private final String _sourceFile;
+
+	private final List<AnnotationInfo> _annotations;
+
+	private final List<MethodInfo> _methods;
+
+	private final List<FieldInfo> _fields;
 
 	private String _configuration;
 
 	private String _implementation;
 
-	TypeInfo(String name, boolean isPublic, boolean isInterface, boolean isAbstract,
-			List<String> supertypes, Set<String> annotations) {
-		_name = name;
-		_isPublic = isPublic;
-		_isInterface = isInterface;
-		_isAbstract = isAbstract;
-		_supertypes = List.copyOf(supertypes);
-		_annotations = Set.copyOf(new LinkedHashSet<>(annotations));
+	TypeInfo(Builder b) {
+		_name = b.name;
+		_access = b.access;
+		_superclass = b.superclass;
+		_interfaces = List.copyOf(b.interfaces);
+		_enclosing = b.enclosing;
+		_moduleId = b.moduleId;
+		_sourceFile = b.sourceFile;
+		_annotations = List.copyOf(b.annotations);
+		_methods = List.copyOf(b.methods);
+		_fields = List.copyOf(b.fields);
+		_configuration = b.configuration;
 	}
 
-	public String name() {
-		return _name;
-	}
+	public String name() { return _name; }
+	public int access() { return _access; }
+	public boolean isPublic() { return (_access & Opcodes.ACC_PUBLIC) != 0; }
+	public boolean isInterface() { return (_access & Opcodes.ACC_INTERFACE) != 0; }
+	public boolean isAbstract() { return (_access & Opcodes.ACC_ABSTRACT) != 0; }
+	public boolean isEnum() { return (_access & Opcodes.ACC_ENUM) != 0; }
+	public boolean isAnnotation() { return (_access & Opcodes.ACC_ANNOTATION) != 0; }
+	public boolean isFinal() { return (_access & Opcodes.ACC_FINAL) != 0; }
 
-	public boolean isPublic() {
-		return _isPublic;
-	}
+	/** FQN of the direct superclass, or {@code null} (for interfaces or {@code java.lang.Object}). */
+	public String superclass() { return _superclass; }
 
-	public boolean isInterface() {
-		return _isInterface;
-	}
+	/** FQNs of directly implemented interfaces (for interfaces: directly extended interfaces). */
+	public List<String> interfaces() { return _interfaces; }
 
-	public boolean isAbstract() {
-		return _isAbstract;
-	}
-
+	/** Concatenation of {@link #superclass()} and {@link #interfaces()} for convenience. */
 	public List<String> supertypes() {
-		return _supertypes;
+		if (_superclass == null) return _interfaces;
+		List<String> all = new ArrayList<>(_interfaces.size() + 1);
+		all.add(_superclass);
+		all.addAll(_interfaces);
+		return all;
 	}
 
-	public Set<String> annotations() {
-		return _annotations;
-	}
+	/** FQN of the enclosing outer class (for nested classes), or {@code null}. */
+	public String enclosing() { return _enclosing; }
+
+	/** Identifier of the Maven module or JAR this class was loaded from. */
+	public String moduleId() { return _moduleId; }
+
+	/** Source file name (from the {@code SourceFile} attribute), or {@code null}. */
+	public String sourceFile() { return _sourceFile; }
+
+	public List<AnnotationInfo> annotations() { return _annotations; }
+
+	public List<MethodInfo> methods() { return _methods; }
+
+	public List<FieldInfo> fields() { return _fields; }
 
 	/** FQN of the config interface this type implements, or {@code null}. */
-	public String configuration() {
-		return _configuration;
-	}
+	public String configuration() { return _configuration; }
 
 	/** FQN of the implementation class for this (config) interface, or {@code null}. */
-	public String implementation() {
-		return _implementation;
-	}
-
-	void setConfiguration(String configuration) {
-		_configuration = configuration;
-	}
+	public String implementation() { return _implementation; }
 
 	void setImplementation(String implementation) {
 		_implementation = implementation;
 	}
 
-	/** Builder used during ASM scanning. */
+	/** Builder populated by the ASM visitor. */
 	static final class Builder {
 		String name;
-
-		boolean isPublic;
-
-		boolean isInterface;
-
-		boolean isAbstract;
-
-		final List<String> supertypes = new ArrayList<>(4);
-
-		final Set<String> annotations = new LinkedHashSet<>();
-
+		int access;
+		String superclass;
+		final List<String> interfaces = new ArrayList<>(2);
+		String enclosing;
+		String moduleId;
+		String sourceFile;
+		final List<AnnotationInfo> annotations = new ArrayList<>();
+		final List<MethodInfo> methods = new ArrayList<>();
+		final List<FieldInfo> fields = new ArrayList<>();
 		String configuration;
 
 		TypeInfo build() {
-			TypeInfo info = new TypeInfo(name, isPublic, isInterface, isAbstract, supertypes, annotations);
-			info._configuration = configuration;
-			return info;
+			return new TypeInfo(this);
 		}
+	}
+
+	/** Immutable annotation record with recursively-parsed parameters. */
+	public record AnnotationInfo(String name, Map<String, Object> values) {
+
+		public AnnotationInfo(String name, Map<String, Object> values) {
+			this.name = name;
+			this.values = values == null || values.isEmpty()
+				? Collections.emptyMap() : Collections.unmodifiableMap(new LinkedHashMap<>(values));
+		}
+	}
+
+	/** Method-level metadata. */
+	public record MethodInfo(
+			String name,
+			String descriptor,
+			int access,
+			String returnType,
+			List<String> parameters,
+			List<String> exceptions,
+			List<AnnotationInfo> annotations,
+			List<CallSite> calls,
+			List<FieldAccess> fieldAccesses,
+			List<String> stringLiterals) {
+
+		public boolean isPublic() { return (access & Opcodes.ACC_PUBLIC) != 0; }
+		public boolean isProtected() { return (access & Opcodes.ACC_PROTECTED) != 0; }
+		public boolean isPrivate() { return (access & Opcodes.ACC_PRIVATE) != 0; }
+		public boolean isStatic() { return (access & Opcodes.ACC_STATIC) != 0; }
+		public boolean isAbstract() { return (access & Opcodes.ACC_ABSTRACT) != 0; }
+		public boolean isFinal() { return (access & Opcodes.ACC_FINAL) != 0; }
+		public boolean isConstructor() { return "<init>".equals(name); }
+	}
+
+	/** Field-level metadata. */
+	public record FieldInfo(
+			String name,
+			String type,
+			int access,
+			Object constantValue,
+			List<AnnotationInfo> annotations) {
+
+		public boolean isPublic() { return (access & Opcodes.ACC_PUBLIC) != 0; }
+		public boolean isProtected() { return (access & Opcodes.ACC_PROTECTED) != 0; }
+		public boolean isPrivate() { return (access & Opcodes.ACC_PRIVATE) != 0; }
+		public boolean isStatic() { return (access & Opcodes.ACC_STATIC) != 0; }
+		public boolean isFinal() { return (access & Opcodes.ACC_FINAL) != 0; }
+		public boolean isEnumConstant() { return (access & Opcodes.ACC_ENUM) != 0; }
+	}
+
+	/** One invocation site captured from a method body. */
+	public record CallSite(String owner, String name, String descriptor) {
+	}
+
+	/** One field-access site captured from a method body. */
+	public record FieldAccess(String owner, String name, String descriptor, boolean write) {
 	}
 
 }
