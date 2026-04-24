@@ -37,7 +37,7 @@ The plugin runs **inside the target project**, not inside this repo. `cd` into a
 Maven project (single-module or multi-module aggregator) and invoke:
 
 ```bash
-mvn -q com.top-logic:tl-mcp-server:0.1.0-SNAPSHOT:serve
+mvn -q com.top-logic:tl-mcp-server:0.1.0:serve
 ```
 
 Maven resolves the reactor's compile classpath and passes it to the plugin, which
@@ -78,7 +78,7 @@ project's working directory:
       "args": [
         "-q",
         "-f", "/absolute/path/to/target-project/pom.xml",
-        "com.top-logic:tl-mcp-server:0.1.0-SNAPSHOT:serve"
+        "com.top-logic:tl-mcp-server:0.1.0:serve"
       ]
     }
   }
