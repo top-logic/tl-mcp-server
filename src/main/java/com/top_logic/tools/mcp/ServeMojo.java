@@ -286,7 +286,16 @@ public class ServeMojo extends AbstractMojo {
 			{
 			  "type": "object",
 			  "properties": {
-			    "fqn": {"type": "string"}
+			    "fqn": {"type": "string", "description": "FQN of the declaring type."},
+			    "name": {"type": "string", "description": "Exact member name."},
+			    "pattern": {"type": "string", "description": "Substring (case-insensitive) against member name; regex when 'regex' is true."},
+			    "regex": {"type": "boolean", "default": false},
+			    "kind": {"type": "string", "enum": ["any", "method", "field"], "default": "any"},
+			    "type": {"type": "string", "description": "For fields: the field type FQN. For methods: the return type FQN."},
+			    "parameter_type": {"type": "string", "description": "Method must accept at least one parameter of this FQN. Fields are excluded when set."},
+			    "annotated_with": {"type": "array", "items": {"type": "string"}, "description": "Member must carry every listed annotation."},
+			    "public_only": {"type": "boolean", "default": false},
+			    "limit": {"type": "integer", "default": 100}
 			  },
 			  "required": ["fqn"]
 			}
@@ -294,21 +303,36 @@ public class ServeMojo extends AbstractMojo {
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("list_members")
-				.description("All declared methods and fields of a type: names, signatures (descriptor, return/parameter/exception types), modifiers (public/static/abstract/final), annotations with parsed parameter values, and field constant values. Inherited members are not included — call on each supertype separately.")
+				.description("List declared methods and/or fields of a type, with optional filters (name/pattern, kind, type, parameter_type, annotations, public_only, limit). Returns signatures, modifiers, annotations with parsed parameter values, and constant values. Inherited members are not included — query each supertype separately.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler((exchange, request) -> {
-				String fqn = stringArg(request.arguments(), "fqn");
-				Map<String, Object> desc = graph.describeMembers(fqn);
-				Map<String, Object> result = new LinkedHashMap<>();
-				if (desc == null) {
-					result.put("found", false);
-					result.put("fqn", fqn);
-				} else {
-					result.put("found", true);
-					result.putAll(desc);
+				Map<String, Object> args = request.arguments();
+				String fqn = stringArg(args, "fqn");
+				try {
+					TypeGraph.MemberQuery mq = new TypeGraph.MemberQuery(
+						nullableStringArg(args, "name"),
+						nullableStringArg(args, "pattern"),
+						boolArg(args, "regex", false),
+						memberKindArg(args, "kind"),
+						nullableStringArg(args, "type"),
+						nullableStringArg(args, "parameter_type"),
+						stringListArg(args, "annotated_with"),
+						boolArg(args, "public_only", false),
+						intArg(args, "limit", 100));
+					Map<String, Object> desc = graph.describeMembers(fqn, mq);
+					Map<String, Object> result = new LinkedHashMap<>();
+					if (desc == null) {
+						result.put("found", false);
+						result.put("fqn", fqn);
+					} else {
+						result.put("found", true);
+						result.putAll(desc);
+					}
+					return jsonResult(json, result);
+				} catch (IllegalArgumentException ex) {
+					return errorResult(ex.getMessage());
 				}
-				return jsonResult(json, result);
 			})
 			.build();
 	}
@@ -503,6 +527,18 @@ public class ServeMojo extends AbstractMojo {
 			return out;
 		}
 		return List.of(v.toString());
+	}
+
+	private static TypeGraph.MemberKind memberKindArg(Map<String, Object> args, String key) {
+		Object v = args.get(key);
+		if (v == null) return TypeGraph.MemberKind.ANY;
+		String t = v.toString().trim().toUpperCase();
+		if (t.isEmpty()) return TypeGraph.MemberKind.ANY;
+		try {
+			return TypeGraph.MemberKind.valueOf(t);
+		} catch (IllegalArgumentException ex) {
+			throw new IllegalArgumentException("Invalid kind '" + v + "'; expected any/method/field.");
+		}
 	}
 
 	private static TypeGraph.Kind kindArg(Map<String, Object> args, String key) {

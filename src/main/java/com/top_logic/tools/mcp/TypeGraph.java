@@ -385,61 +385,167 @@ public class TypeGraph {
 		return out;
 	}
 
-	public Map<String, Object> describeMembers(String fqn) {
+	public enum MemberKind {
+		ANY, METHOD, FIELD
+	}
+
+	public record MemberQuery(
+			String name,
+			String pattern,
+			boolean regex,
+			MemberKind kind,
+			String type,
+			String parameterType,
+			List<String> annotatedWith,
+			boolean publicOnly,
+			int limit) {
+	}
+
+	public Map<String, Object> describeMembers(String fqn, MemberQuery q) {
 		TypeInfo info = _types.get(fqn);
 		if (info == null) return null;
+
+		Pattern pattern = null;
+		String needle = null;
+		if (q.pattern() != null && !q.pattern().isEmpty()) {
+			if (q.regex()) {
+				try {
+					pattern = Pattern.compile(q.pattern());
+				} catch (PatternSyntaxException ex) {
+					throw new IllegalArgumentException("Invalid regex: " + ex.getMessage(), ex);
+				}
+			} else {
+				needle = q.pattern().toLowerCase();
+			}
+		}
+		MemberKind kind = q.kind() == null ? MemberKind.ANY : q.kind();
+		List<String> required = q.annotatedWith() == null ? List.of() : q.annotatedWith();
+		boolean paramTypeFilter = q.parameterType() != null && !q.parameterType().isEmpty();
+
+		List<Map<String, Object>> methods = new ArrayList<>();
+		int totalMethods = 0;
+		if (kind != MemberKind.FIELD) {
+			for (MethodInfo m : info.methods()) {
+				if (!memberNameMatches(m.name(), q.name(), pattern, needle)) continue;
+				if (q.publicOnly() && !m.isPublic()) continue;
+				if (q.type() != null && !q.type().isEmpty() && !q.type().equals(m.returnType())) continue;
+				if (paramTypeFilter && !hasParameterOfType(m, q.parameterType())) continue;
+				if (!hasAllAnnotations(m.annotations(), required)) continue;
+				totalMethods++;
+				methods.add(methodMap(m));
+			}
+		} else if (paramTypeFilter) {
+			// "parameter_type" is method-only; fields trivially never match.
+		}
+
+		List<Map<String, Object>> fields = new ArrayList<>();
+		int totalFields = 0;
+		if (kind != MemberKind.METHOD && !paramTypeFilter) {
+			for (FieldInfo f : info.fields()) {
+				if (!memberNameMatches(f.name(), q.name(), pattern, needle)) continue;
+				if (q.publicOnly() && !f.isPublic()) continue;
+				if (q.type() != null && !q.type().isEmpty() && !q.type().equals(f.type())) continue;
+				if (!hasAllAnnotations(f.annotations(), required)) continue;
+				totalFields++;
+				fields.add(fieldMap(f));
+			}
+		}
+
+		boolean truncated = false;
+		if (q.limit() > 0) {
+			if (methods.size() > q.limit()) {
+				methods = new ArrayList<>(methods.subList(0, q.limit()));
+				truncated = true;
+			}
+			int remaining = q.limit() - methods.size();
+			if (remaining <= 0) {
+				if (!fields.isEmpty()) truncated = true;
+				fields = List.of();
+			} else if (fields.size() > remaining) {
+				fields = new ArrayList<>(fields.subList(0, remaining));
+				truncated = true;
+			}
+		}
+
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("name", fqn);
-		List<Map<String, Object>> methods = new ArrayList<>();
-		for (MethodInfo m : info.methods()) {
-			Map<String, Object> mm = new LinkedHashMap<>();
-			mm.put("name", m.name());
-			mm.put("descriptor", m.descriptor());
-			mm.put("returnType", m.returnType());
-			List<Map<String, Object>> paramList = new ArrayList<>(m.parameters().size());
-			for (Parameter p : m.parameters()) {
-				Map<String, Object> entry = new LinkedHashMap<>();
-				if (p.name() != null) entry.put("name", p.name());
-				entry.put("type", p.type());
-				paramList.add(entry);
-			}
-			mm.put("parameters", paramList);
-			if (!m.exceptions().isEmpty()) mm.put("exceptions", new ArrayList<>(m.exceptions()));
-			mm.put("public", m.isPublic());
-			if (m.isProtected()) mm.put("protected", true);
-			if (m.isPrivate()) mm.put("private", true);
-			if (m.isStatic()) mm.put("static", true);
-			if (m.isAbstract()) mm.put("abstract", true);
-			if (m.isFinal()) mm.put("final", true);
-			if (!m.annotations().isEmpty()) {
-				List<Map<String, Object>> anns = new ArrayList<>();
-				for (AnnotationInfo a : m.annotations()) anns.add(annotationMap(a));
-				mm.put("annotations", anns);
-			}
-			methods.add(mm);
-		}
+		out.put("totalMethods", totalMethods);
+		out.put("totalFields", totalFields);
+		out.put("truncated", truncated);
 		out.put("methods", methods);
-		List<Map<String, Object>> fields = new ArrayList<>();
-		for (FieldInfo f : info.fields()) {
-			Map<String, Object> ff = new LinkedHashMap<>();
-			ff.put("name", f.name());
-			ff.put("type", f.type());
-			ff.put("public", f.isPublic());
-			if (f.isProtected()) ff.put("protected", true);
-			if (f.isPrivate()) ff.put("private", true);
-			if (f.isStatic()) ff.put("static", true);
-			if (f.isFinal()) ff.put("final", true);
-			if (f.isEnumConstant()) ff.put("enumConstant", true);
-			if (f.constantValue() != null) ff.put("constantValue", f.constantValue());
-			if (!f.annotations().isEmpty()) {
-				List<Map<String, Object>> anns = new ArrayList<>();
-				for (AnnotationInfo a : f.annotations()) anns.add(annotationMap(a));
-				ff.put("annotations", anns);
-			}
-			fields.add(ff);
-		}
 		out.put("fields", fields);
 		return out;
+	}
+
+	private static boolean memberNameMatches(String memberName, String exact, Pattern regex, String needle) {
+		if (exact != null && !exact.isEmpty() && !exact.equals(memberName)) return false;
+		if (regex != null && !regex.matcher(memberName).find()) return false;
+		if (needle != null && !memberName.toLowerCase().contains(needle)) return false;
+		return true;
+	}
+
+	private static boolean hasParameterOfType(MethodInfo m, String paramType) {
+		for (Parameter p : m.parameters()) {
+			if (paramType.equals(p.type())) return true;
+		}
+		return false;
+	}
+
+	private static boolean hasAllAnnotations(List<AnnotationInfo> present, List<String> required) {
+		if (required.isEmpty()) return true;
+		Set<String> names = new HashSet<>();
+		for (AnnotationInfo a : present) names.add(a.name());
+		for (String required1 : required) {
+			if (!names.contains(required1)) return false;
+		}
+		return true;
+	}
+
+	private static Map<String, Object> methodMap(MethodInfo m) {
+		Map<String, Object> mm = new LinkedHashMap<>();
+		mm.put("name", m.name());
+		mm.put("descriptor", m.descriptor());
+		mm.put("returnType", m.returnType());
+		List<Map<String, Object>> paramList = new ArrayList<>(m.parameters().size());
+		for (Parameter p : m.parameters()) {
+			Map<String, Object> entry = new LinkedHashMap<>();
+			if (p.name() != null) entry.put("name", p.name());
+			entry.put("type", p.type());
+			paramList.add(entry);
+		}
+		mm.put("parameters", paramList);
+		if (!m.exceptions().isEmpty()) mm.put("exceptions", new ArrayList<>(m.exceptions()));
+		mm.put("public", m.isPublic());
+		if (m.isProtected()) mm.put("protected", true);
+		if (m.isPrivate()) mm.put("private", true);
+		if (m.isStatic()) mm.put("static", true);
+		if (m.isAbstract()) mm.put("abstract", true);
+		if (m.isFinal()) mm.put("final", true);
+		if (!m.annotations().isEmpty()) {
+			List<Map<String, Object>> anns = new ArrayList<>();
+			for (AnnotationInfo a : m.annotations()) anns.add(annotationMap(a));
+			mm.put("annotations", anns);
+		}
+		return mm;
+	}
+
+	private static Map<String, Object> fieldMap(FieldInfo f) {
+		Map<String, Object> ff = new LinkedHashMap<>();
+		ff.put("name", f.name());
+		ff.put("type", f.type());
+		ff.put("public", f.isPublic());
+		if (f.isProtected()) ff.put("protected", true);
+		if (f.isPrivate()) ff.put("private", true);
+		if (f.isStatic()) ff.put("static", true);
+		if (f.isFinal()) ff.put("final", true);
+		if (f.isEnumConstant()) ff.put("enumConstant", true);
+		if (f.constantValue() != null) ff.put("constantValue", f.constantValue());
+		if (!f.annotations().isEmpty()) {
+			List<Map<String, Object>> anns = new ArrayList<>();
+			for (AnnotationInfo a : f.annotations()) anns.add(annotationMap(a));
+			ff.put("annotations", anns);
+		}
+		return ff;
 	}
 
 	private static Map<String, Object> annotationMap(AnnotationInfo a) {
