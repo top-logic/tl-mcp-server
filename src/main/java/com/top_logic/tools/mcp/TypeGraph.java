@@ -769,6 +769,15 @@ public class TypeGraph {
 	public record SourceResult(String file, String text, int startLine, int endLine, int totalLines) {
 	}
 
+	public enum SourceMode {
+		/** Auto: 'doc' for class-level queries, 'source' for member queries. */
+		AUTO,
+		/** Javadoc + annotations + signature only (no method/class body). */
+		DOC,
+		/** Header block plus method body or full class source. */
+		SOURCE
+	}
+
 	/**
 	 * Returns the source text for a type or one of its members, pulled from the companion source
 	 * directory (reactor modules) or {@code -sources.jar} (external dependencies) that the
@@ -786,7 +795,8 @@ public class TypeGraph {
 	 *        For member snippets, number of lines of leading context (javadoc, annotations) to
 	 *        include before the method header. Default suggested: 30.
 	 */
-	public SourceResult sourceOf(String fqn, String member, String descriptor, int contextLines) throws IOException {
+	public SourceResult sourceOf(String fqn, String member, String descriptor, SourceMode mode, int contextLines)
+			throws IOException {
 		TypeInfo info = _types.get(fqn);
 		if (info == null) return null;
 		if (info.sourceRoot() == null || info.sourceFile() == null) return null;
@@ -799,8 +809,23 @@ public class TypeGraph {
 		List<String> lines = readAllLines(info.sourceRoot(), entry);
 		if (lines == null) return null;
 
-		if (member == null || member.isEmpty()) {
-			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+		SourceMode effective = mode == null ? SourceMode.AUTO : mode;
+		boolean memberQuery = member != null && !member.isEmpty();
+		if (effective == SourceMode.AUTO) {
+			effective = memberQuery ? SourceMode.SOURCE : SourceMode.DOC;
+		}
+
+		if (!memberQuery) {
+			if (effective == SourceMode.SOURCE) {
+				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+			}
+			// DOC: class-level javadoc + class signature up to the opening '{'.
+			String simple = simpleNameOf(fqn);
+			int[] classRange = findClassDeclRange(lines, simple);
+			if (classRange == null) {
+				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+			}
+			return snippet(entry, lines, classRange[0], classRange[2]);
 		}
 
 		MethodInfo m = findMethod(info, member, descriptor);
@@ -808,13 +833,23 @@ public class TypeGraph {
 			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
 		}
 
+		// DOC mode: always find header range via text search — that gives us the terminator
+		// (';' or '{') which is the precise end of the declaration signature.
+		if (effective == SourceMode.DOC) {
+			int[] range = findByTextSearch(lines, member, descriptor);
+			if (range == null) {
+				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+			}
+			int from = contextLines > 0 ? Math.max(1, range[1] - contextLines) : range[0];
+			int to = Math.min(lines.size(), range[2]);
+			return snippet(entry, lines, from, to);
+		}
+
+		// SOURCE mode: prefer bytecode line info, fall back to text search for abstract methods.
 		int startLine = m.startLine();
 		int endLine = m.endLine();
 		int textSearchFrom = -1;
 		if (startLine <= 0) {
-			// No LineNumberTable — typical for abstract / interface methods. Fall back to a text
-			// search: find the declaration line, walk up through the attached javadoc /
-			// annotation / blank lines, and down to the terminator (';' or '{').
 			int[] range = findByTextSearch(lines, member, descriptor);
 			if (range == null) {
 				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
@@ -825,14 +860,11 @@ public class TypeGraph {
 		}
 
 		int from;
-		if (contextLines >= 0) {
+		if (contextLines > 0) {
 			from = Math.max(1, startLine - contextLines);
 		} else if (textSearchFrom > 0) {
 			from = textSearchFrom;
 		} else {
-			// Auto: anchor at the previous member's closing line + 1. The resulting gap contains
-			// the javadoc + annotations + signature belonging to this member. For the first
-			// member in the class, start at line 1 (package/imports/class-level javadoc).
 			int prevEnd = 0;
 			for (MethodInfo other : info.methods()) {
 				if (other == m) continue;
@@ -842,9 +874,71 @@ public class TypeGraph {
 			}
 			from = prevEnd > 0 ? prevEnd + 1 : 1;
 		}
-		int to = Math.min(lines.size(), endLine + 1);
+		return snippet(entry, lines, from, Math.min(lines.size(), endLine + 1));
+	}
+
+	private static SourceResult snippet(String entry, List<String> lines, int from, int to) {
+		if (from < 1) from = 1;
+		if (to > lines.size()) to = lines.size();
+		if (to < from) to = from;
 		String text = String.join("\n", lines.subList(from - 1, to));
 		return new SourceResult(entry, text, from, to, lines.size());
+	}
+
+	private static String simpleNameOf(String fqn) {
+		int dot = fqn.lastIndexOf('.');
+		String tail = dot < 0 ? fqn : fqn.substring(dot + 1);
+		int dollar = tail.lastIndexOf('$');
+		return dollar < 0 ? tail : tail.substring(dollar + 1);
+	}
+
+	/**
+	 * Locates the class declaration in a source file.
+	 *
+	 * @return {@code [headerFrom, declLine, openBraceLine]} (1-based), or {@code null} when not
+	 *         found.
+	 */
+	private static int[] findClassDeclRange(List<String> lines, String simpleName) {
+		Pattern declPattern = Pattern.compile(
+			"\\b(?:class|interface|record|enum|@interface)\\s+" + Pattern.quote(simpleName) + "\\b");
+		int declLine = -1;
+		for (int i = 0; i < lines.size(); i++) {
+			String line = lines.get(i);
+			String trimmed = line.trim();
+			if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
+			if (declPattern.matcher(line).find()) {
+				declLine = i + 1;
+				break;
+			}
+		}
+		if (declLine < 0) return null;
+		int openBraceLine = declLine;
+		for (int j = declLine - 1; j < lines.size(); j++) {
+			if (lines.get(j).contains("{")) {
+				openBraceLine = j + 1;
+				break;
+			}
+		}
+		int headerFrom = walkUpHeader(lines, declLine);
+		return new int[] { headerFrom, declLine, openBraceLine };
+	}
+
+	private static int walkUpHeader(List<String> lines, int declLine) {
+		int headerFrom = declLine;
+		for (int k = declLine - 2; k >= 0; k--) {
+			String trimmed = lines.get(k).trim();
+			if (trimmed.isEmpty()
+				|| trimmed.startsWith("//")
+				|| trimmed.startsWith("/**") || trimmed.startsWith("/*")
+				|| trimmed.startsWith("*")
+				|| trimmed.endsWith("*/")
+				|| trimmed.startsWith("@")) {
+				headerFrom = k + 1;
+			} else {
+				break;
+			}
+		}
+		return headerFrom;
 	}
 
 	/**
@@ -882,22 +976,7 @@ public class TypeGraph {
 				break;
 			}
 		}
-		// Walk up over javadoc/annotation/blank lines that belong to this declaration.
-		int headerFrom = declLine;
-		for (int k = declLine - 2; k >= 0; k--) {
-			String trimmed = lines.get(k).trim();
-			if (trimmed.isEmpty()
-				|| trimmed.startsWith("//")
-				|| trimmed.startsWith("/**") || trimmed.startsWith("/*")
-				|| trimmed.startsWith("*")
-				|| trimmed.endsWith("*/")
-				|| trimmed.startsWith("@")) {
-				headerFrom = k + 1;
-			} else {
-				break;
-			}
-		}
-		return new int[] { headerFrom, declLine, endLine };
+		return new int[] { walkUpHeader(lines, declLine), declLine, endLine };
 	}
 
 	/**

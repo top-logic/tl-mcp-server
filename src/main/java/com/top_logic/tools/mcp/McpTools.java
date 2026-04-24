@@ -5,6 +5,7 @@
  */
 package com.top_logic.tools.mcp;
 
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.ArrayList;
@@ -408,9 +409,10 @@ public final class McpTools {
 			  "type": "object",
 			  "properties": {
 			    "fqn": {"type": "string", "description": "FQN of the declaring type."},
-			    "member": {"type": "string", "description": "Optional method name ('<init>' for constructors); omit to return the full source file."},
-			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor to disambiguate overloaded methods."},
-			    "context_lines": {"type": "integer", "default": -1, "description": "Leading context lines before the member's first executable line. A negative value (default) activates auto-mode: the snippet starts right after the previous member's closing line, which contains exactly the javadoc + annotations + signature attached to this member. Pass a non-negative value for a fixed-size window instead."}
+			    "member": {"type": "string", "description": "Optional method name; omit for a class-level query."},
+			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor to disambiguate overloads."},
+			    "mode": {"type": "string", "enum": ["auto", "doc", "source"], "default": "auto"},
+			    "context_lines": {"type": "integer", "default": 0, "description": "Leading context lines before the declaration. 0 = auto (anchor at the attached javadoc/annotation block)."}
 			  },
 			  "required": ["fqn"]
 			}
@@ -418,7 +420,7 @@ public final class McpTools {
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("show_source")
-				.description("Returns the Java source of a type or one of its methods. Pulls from the reactor module's src/main/java or from the companion -sources.jar of an external dependency. By default, auto-context anchors the snippet at the previous member's end line, so the leading block (javadoc + annotations + signature) belongs exactly to the queried member. Fields and methods without line info fall back to the full source file.")
+				.description("Returns Java source for a type or one of its methods, pulled from the reactor module's src/main/java or the companion -sources.jar of an external dependency. Mode 'doc' (default for classes) returns only javadoc + signature so the response stays small. Mode 'source' (default for members) returns the implementation. Request a member by name; omit it for a class-level header or full file.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler(safe((exchange, request) -> {
@@ -426,9 +428,10 @@ public final class McpTools {
 				String fqn = stringArg(args, "fqn");
 				String member = nullableStringArg(args, "member");
 				String descriptor = nullableStringArg(args, "descriptor");
-				int ctx = intArg(args, "context_lines", -1);
+				int ctx = intArg(args, "context_lines", 0);
+				TypeGraph.SourceMode mode = sourceModeArg(args, "mode");
 				try {
-					TypeGraph.SourceResult r = graph.sourceOf(fqn, member, descriptor, ctx);
+					TypeGraph.SourceResult r = graph.sourceOf(fqn, member, descriptor, mode, ctx);
 					Map<String, Object> result = new LinkedHashMap<>();
 					if (r == null) {
 						result.put("found", false);
@@ -443,11 +446,23 @@ public final class McpTools {
 						result.put("text", r.text());
 					}
 					return jsonResult(json, result);
-				} catch (java.io.IOException ex) {
+				} catch (IOException ex) {
 					return errorResult("IO error reading source: " + ex.getMessage());
 				}
 			}))
 			.build();
+	}
+
+	private static TypeGraph.SourceMode sourceModeArg(Map<String, Object> args, String key) {
+		Object v = args.get(key);
+		if (v == null) return TypeGraph.SourceMode.AUTO;
+		String s = v.toString().trim().toUpperCase();
+		if (s.isEmpty()) return TypeGraph.SourceMode.AUTO;
+		try {
+			return TypeGraph.SourceMode.valueOf(s);
+		} catch (IllegalArgumentException ex) {
+			throw new IllegalArgumentException("Invalid mode '" + v + "'; expected auto/doc/source.");
+		}
 	}
 
 	private static SyncToolSpecification moduleOf(McpJsonMapper json, TypeGraph graph) {
