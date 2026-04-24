@@ -6,11 +6,14 @@
 package com.top_logic.tools.mcp;
 
 import java.io.File;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiFunction;
 
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.execution.MavenSession;
@@ -31,9 +34,11 @@ import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpServerFeatures.SyncToolSpecification;
 import io.modelcontextprotocol.server.McpSyncServer;
+import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTransportProvider;
 import io.modelcontextprotocol.server.transport.StdioServerTransportProvider;
 import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.spec.McpSchema.CallToolRequest;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
@@ -222,7 +227,7 @@ public class ServeMojo extends AbstractMojo {
 				.description("Filter the type index. All filters optional, AND-combined. Returns sorted FQNs with total count and a 'truncated' flag.")
 				.inputSchema(json, schema)
 				.build())
-			.callHandler((exchange, request) -> {
+			.callHandler(safe((exchange, request) -> {
 				Map<String, Object> args = request.arguments();
 				try {
 					TypeGraph.TypeQuery q = new TypeGraph.TypeQuery(
@@ -246,7 +251,7 @@ public class ServeMojo extends AbstractMojo {
 				} catch (IllegalArgumentException ex) {
 					return errorResult(ex.getMessage());
 				}
-			})
+			}))
 			.build();
 	}
 
@@ -266,7 +271,7 @@ public class ServeMojo extends AbstractMojo {
 				.description("Metadata of a single type by FQN: modifiers, superclass, interfaces, enclosing outer class, module, source file, annotations (with parsed parameter values), and method/field counts. For the member list call list_members.")
 				.inputSchema(json, schema)
 				.build())
-			.callHandler((exchange, request) -> {
+			.callHandler(safe((exchange, request) -> {
 				String fqn = stringArg(request.arguments(), "fqn");
 				Map<String, Object> desc = graph.describe(fqn);
 				Map<String, Object> result = new LinkedHashMap<>();
@@ -278,7 +283,7 @@ public class ServeMojo extends AbstractMojo {
 					result.put("type", desc);
 				}
 				return jsonResult(json, result);
-			})
+			}))
 			.build();
 	}
 
@@ -307,7 +312,7 @@ public class ServeMojo extends AbstractMojo {
 				.description("List declared methods and/or fields of a type, with optional filters (name/pattern, kind, type, parameter_type, annotations, public_only, limit). Returns signatures, modifiers, annotations with parsed parameter values, and constant values. Inherited members are not included — query each supertype separately.")
 				.inputSchema(json, schema)
 				.build())
-			.callHandler((exchange, request) -> {
+			.callHandler(safe((exchange, request) -> {
 				Map<String, Object> args = request.arguments();
 				String fqn = stringArg(args, "fqn");
 				try {
@@ -334,7 +339,7 @@ public class ServeMojo extends AbstractMojo {
 				} catch (IllegalArgumentException ex) {
 					return errorResult(ex.getMessage());
 				}
-			})
+			}))
 			.build();
 	}
 
@@ -368,7 +373,7 @@ public class ServeMojo extends AbstractMojo {
 				.description("Concrete usage sites of a type, Eclipse 'Search Java' style. Each result identifies the owning type, member (if applicable), and the kind of usage (supertype, method_return, method_parameter, field_type, instantiation, cast, catch, call_dispatch, field_read, etc.). Response also carries a per-kind histogram.")
 				.inputSchema(json, schema)
 				.build())
-			.callHandler((exchange, request) -> {
+			.callHandler(safe((exchange, request) -> {
 				Map<String, Object> args = request.arguments();
 				String fqn = stringArg(args, "fqn");
 				try {
@@ -403,7 +408,7 @@ public class ServeMojo extends AbstractMojo {
 				} catch (IllegalArgumentException ex) {
 					return errorResult(ex.getMessage());
 				}
-			})
+			}))
 			.build();
 	}
 
@@ -446,7 +451,7 @@ public class ServeMojo extends AbstractMojo {
 				.description("Call sites that invoke the given method. Requires body scan (tl-mcp.bodies=true, the default). Calls are recorded in bytecode against the static declared owner, so by default we also include every subtype that declares an override of the same (name, descriptor) — a 'this.foo()' inside an overriding subclass then still counts as a caller of the supertype's method. Disable via include_overrides=false for strict matching.")
 				.inputSchema(json, schema)
 				.build())
-			.callHandler((exchange, request) -> {
+			.callHandler(safe((exchange, request) -> {
 				String owner = stringArg(request.arguments(), "owner");
 				String method = stringArg(request.arguments(), "method");
 				String descriptor = nullableStringArg(request.arguments(), "descriptor");
@@ -471,7 +476,7 @@ public class ServeMojo extends AbstractMojo {
 				result.put("truncated", truncated);
 				result.put("callers", truncated ? out.subList(0, limit) : out);
 				return jsonResult(json, result);
-			})
+			}))
 			.build();
 	}
 
@@ -494,7 +499,7 @@ public class ServeMojo extends AbstractMojo {
 				.description("Methods that read or write a field (from bytecode). Requires body scan. 'mode' selects reads, writes, or both.")
 				.inputSchema(json, schema)
 				.build())
-			.callHandler((exchange, request) -> {
+			.callHandler(safe((exchange, request) -> {
 				String owner = stringArg(request.arguments(), "owner");
 				String field = stringArg(request.arguments(), "field");
 				String mode = nullableStringArg(request.arguments(), "mode");
@@ -532,7 +537,7 @@ public class ServeMojo extends AbstractMojo {
 				result.put("truncated", truncated);
 				result.put("accessors", truncated ? out.subList(0, limit) : out);
 				return jsonResult(json, result);
-			})
+			}))
 			.build();
 	}
 
@@ -552,7 +557,7 @@ public class ServeMojo extends AbstractMojo {
 				.description("Returns the Maven module id (or JAR GAV / filename) that supplied the given class. Useful for dependency-graph questions like 'which JAR brings this class in?'.")
 				.inputSchema(json, schema)
 				.build())
-			.callHandler((exchange, request) -> {
+			.callHandler(safe((exchange, request) -> {
 				String fqn = stringArg(request.arguments(), "fqn");
 				String module = graph.moduleOf(fqn);
 				Map<String, Object> result = new LinkedHashMap<>();
@@ -560,7 +565,7 @@ public class ServeMojo extends AbstractMojo {
 				result.put("found", module != null);
 				if (module != null) result.put("module", module);
 				return jsonResult(json, result);
-			})
+			}))
 			.build();
 	}
 
@@ -650,6 +655,26 @@ public class ServeMojo extends AbstractMojo {
 			.isError(true)
 			.content(List.of(new McpSchema.TextContent(message)))
 			.build();
+	}
+
+	/**
+	 * Wraps a tool handler so that any uncaught {@link Throwable} turns into a structured error
+	 * result instead of leaving the MCP client waiting for a response that never arrives.
+	 */
+	private static BiFunction<McpSyncServerExchange, CallToolRequest, CallToolResult> safe(
+			BiFunction<McpSyncServerExchange, CallToolRequest, CallToolResult> inner) {
+		return (exchange, request) -> {
+			try {
+				return inner.apply(exchange, request);
+			} catch (Throwable t) {
+				StringWriter sw = new StringWriter();
+				t.printStackTrace(new PrintWriter(sw));
+				String message = t.getClass().getName() + ": "
+					+ (t.getMessage() == null ? "(no message)" : t.getMessage())
+					+ "\n" + sw.toString().trim();
+				return errorResult(message);
+			}
+		};
 	}
 
 }
