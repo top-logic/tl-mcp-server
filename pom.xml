@@ -5,7 +5,7 @@
 
 	<groupId>com.top-logic</groupId>
 	<artifactId>tl-mcp-server</artifactId>
-	<version>0.1.0</version>
+	<version>0.1.1-SNAPSHOT</version>
 	<packaging>maven-plugin</packaging>
 
 	<name>TopLogic MCP Server</name>
@@ -31,7 +31,7 @@
 		<connection>scm:git:http://tl.bos.local:3000/TopLogic/tl-mcp-server.git</connection>
 		<developerConnection>scm:git:http://tl.bos.local:3000/TopLogic/tl-mcp-server.git</developerConnection>
 		<url>http://tl.bos.local:3000/TopLogic/tl-mcp-server</url>
-		<tag>v0.1.0</tag>
+		<tag>HEAD</tag>
 	</scm>
 
 	<dependencies>
