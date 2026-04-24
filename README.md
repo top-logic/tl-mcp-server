@@ -175,8 +175,8 @@ Snapshot deploy (continuous, from `*-SNAPSHOT` branches):
 mvn deploy
 ```
 
-Cutting a release uses the `maven-release-plugin` (same configuration as the
-engine: tag format `TL_<version>`, preparation runs `clean install`):
+Cutting a release uses the `maven-release-plugin` (tag format `v<version>`,
+preparation runs `clean install`):
 
 ```bash
 mvn release:prepare     # drops SNAPSHOT, runs clean install, commits, tags,
