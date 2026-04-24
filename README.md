@@ -16,13 +16,20 @@ serves queries over stdio or HTTP.
 
 ## Install the plugin
 
-Once, in this repo, so the artifact lands in your local Maven repository:
+Release builds are published to the TopLogic Nexus
+(<https://dev.top-logic.com/nexus/repository/toplogic/>). Users with that
+repository configured as a mirror or plugin repository in their
+`~/.m2/settings.xml` can invoke the `serve` goal directly — Maven fetches the
+plugin on first use.
+
+For local development (or if the Nexus is not reachable), install the snapshot
+into your local repository:
 
 ```bash
 mvn install
 ```
 
-This publishes `com.top-logic:tl-mcp-server:0.1.0-SNAPSHOT` to `~/.m2/repository`.
+This publishes `com.top-logic:tl-mcp-server:<version>-SNAPSHOT` to `~/.m2/repository`.
 
 ## Run against another project
 
@@ -155,6 +162,34 @@ filter (omitted = both).
 - **Error safety.** Every tool handler is wrapped in a `Throwable`-catching
   adapter; an uncaught exception turns into an `isError: true` result with a
   stack trace instead of leaving the client hanging.
+
+## Release process
+
+`distributionManagement` is wired to the TopLogic Nexus (same IDs as the engine:
+`tl-releases` / `tl-snapshots`). Credentials live in your `~/.m2/settings.xml`
+under those server IDs.
+
+Snapshot deploy (continuous, from `*-SNAPSHOT` branches):
+
+```bash
+mvn deploy
+```
+
+Cutting a release:
+
+```bash
+mvn versions:set -DnewVersion=0.1.0 -DgenerateBackupPoms=false
+mvn clean deploy
+git commit -am "Release 0.1.0"
+git tag v0.1.0 && git push --tags
+mvn versions:set -DnewVersion=0.2.0-SNAPSHOT -DgenerateBackupPoms=false
+git commit -am "Bump to 0.2.0-SNAPSHOT"
+git push
+```
+
+After the release lands in Nexus, update `tl-claude-tools` (or any other
+consumer) to reference the released coordinate
+(`com.top-logic:tl-mcp-server:0.1.0`) instead of the snapshot.
 
 ## Development
 
