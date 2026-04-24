@@ -367,18 +367,50 @@ public class TypeGraph {
 	public record UsageResult(List<Usage> usages, int total, boolean truncated, Map<UsageKind, Integer> byKind) {
 	}
 
-	public List<CallerRef> callersOf(String owner, String method, String descriptor) {
-		List<CallerRef> raw;
-		if (descriptor != null && !descriptor.isEmpty()) {
-			raw = _callers.get(owner + "#" + method + "#" + descriptor);
-		} else {
-			raw = new ArrayList<>();
-			String prefix = owner + "#" + method + "#";
-			for (Map.Entry<String, List<CallerRef>> e : _callers.entrySet()) {
-				if (e.getKey().startsWith(prefix)) raw.addAll(e.getValue());
+	/**
+	 * @param includeOverrides
+	 *        When {@code true}, the result also contains calls statically dispatched through any
+	 *        subtype of {@code owner} that declares a method with matching name (and descriptor
+	 *        when given). Bytecode records each call against its declared static-type owner, so
+	 *        a {@code this.foo()} call inside an overriding subclass would not match the
+	 *        supertype otherwise.
+	 */
+	public List<CallerRef> callersOf(String owner, String method, String descriptor, boolean includeOverrides) {
+		List<String> owners = new ArrayList<>();
+		owners.add(owner);
+		if (includeOverrides) {
+			for (String sub : specializationsOf(owner, true)) {
+				if (declaresMethod(sub, method, descriptor)) {
+					owners.add(sub);
+				}
 			}
 		}
-		return raw == null ? List.of() : aggregateCallers(raw);
+
+		List<CallerRef> raw = new ArrayList<>();
+		boolean exactDescriptor = descriptor != null && !descriptor.isEmpty();
+		for (String o : owners) {
+			if (exactDescriptor) {
+				List<CallerRef> direct = _callers.get(o + "#" + method + "#" + descriptor);
+				if (direct != null) raw.addAll(direct);
+			} else {
+				String prefix = o + "#" + method + "#";
+				for (Map.Entry<String, List<CallerRef>> e : _callers.entrySet()) {
+					if (e.getKey().startsWith(prefix)) raw.addAll(e.getValue());
+				}
+			}
+		}
+		return raw.isEmpty() ? List.of() : aggregateCallers(raw);
+	}
+
+	private boolean declaresMethod(String fqn, String method, String descriptor) {
+		TypeInfo info = _types.get(fqn);
+		if (info == null) return false;
+		boolean exactDescriptor = descriptor != null && !descriptor.isEmpty();
+		for (MethodInfo m : info.methods()) {
+			if (!method.equals(m.name())) continue;
+			if (!exactDescriptor || descriptor.equals(m.descriptor())) return true;
+		}
+		return false;
 	}
 
 	public List<AccessorRef> fieldReaders(String owner, String field) {

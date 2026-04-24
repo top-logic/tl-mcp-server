@@ -434,6 +434,7 @@ public class ServeMojo extends AbstractMojo {
 			    "owner": {"type": "string", "description": "FQN of the class declaring the method."},
 			    "method": {"type": "string", "description": "Method name (or '<init>' for constructors)."},
 			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor (e.g. '(Ljava/lang/String;)I'); omit to match all overloads."},
+			    "include_overrides": {"type": "boolean", "default": true, "description": "When true (default), also return call sites whose static owner is a subtype of 'owner' that declares an override with matching name and descriptor. Turn off for strict bytecode-owner matching."},
 			    "limit": {"type": "integer", "default": 200}
 			  },
 			  "required": ["owner", "method"]
@@ -442,15 +443,16 @@ public class ServeMojo extends AbstractMojo {
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("callers_of")
-				.description("Call sites that invoke the given method. Requires body scan (tl-mcp.bodies=true, the default). Results are exact per bytecode descriptor: a call to a method declared on a supertype is recorded against that supertype, not its overriding subclass.")
+				.description("Call sites that invoke the given method. Requires body scan (tl-mcp.bodies=true, the default). Calls are recorded in bytecode against the static declared owner, so by default we also include every subtype that declares an override of the same (name, descriptor) — a 'this.foo()' inside an overriding subclass then still counts as a caller of the supertype's method. Disable via include_overrides=false for strict matching.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler((exchange, request) -> {
 				String owner = stringArg(request.arguments(), "owner");
 				String method = stringArg(request.arguments(), "method");
 				String descriptor = nullableStringArg(request.arguments(), "descriptor");
+				boolean includeOverrides = boolArg(request.arguments(), "include_overrides", true);
 				int limit = intArg(request.arguments(), "limit", 200);
-				List<TypeGraph.CallerRef> callers = graph.callersOf(owner, method, descriptor);
+				List<TypeGraph.CallerRef> callers = graph.callersOf(owner, method, descriptor, includeOverrides);
 				List<Map<String, Object>> out = new ArrayList<>();
 				for (TypeGraph.CallerRef ref : callers) {
 					Map<String, Object> e = new LinkedHashMap<>();
