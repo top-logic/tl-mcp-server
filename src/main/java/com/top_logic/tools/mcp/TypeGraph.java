@@ -764,4 +764,94 @@ public class TypeGraph {
 		return new ArrayList<>(new TreeSet<>(in));
 	}
 
+	// ---------- Source lookup ----------
+
+	public record SourceResult(String file, String text, int startLine, int endLine, int totalLines) {
+	}
+
+	/**
+	 * Returns the source text for a type or one of its members, pulled from the companion source
+	 * directory (reactor modules) or {@code -sources.jar} (external dependencies) that the
+	 * scanner discovered.
+	 *
+	 * @param fqn
+	 *        FQN of the declaring type. For nested classes the outer source file is used, because
+	 *        nested classes share the enclosing {@code .java}.
+	 * @param member
+	 *        Method name (or {@code <init>}) to return a snippet for; {@code null} returns the
+	 *        whole source.
+	 * @param descriptor
+	 *        Optional bytecode descriptor to disambiguate overloads.
+	 * @param contextLines
+	 *        For member snippets, number of lines of leading context (javadoc, annotations) to
+	 *        include before the method header. Default suggested: 30.
+	 */
+	public SourceResult sourceOf(String fqn, String member, String descriptor, int contextLines) throws IOException {
+		TypeInfo info = _types.get(fqn);
+		if (info == null) return null;
+		if (info.sourceRoot() == null || info.sourceFile() == null) return null;
+
+		String pkgPath;
+		int lastDot = fqn.lastIndexOf('.');
+		pkgPath = lastDot < 0 ? "" : fqn.substring(0, lastDot).replace('.', '/') + "/";
+		String entry = pkgPath + info.sourceFile();
+
+		List<String> lines = readAllLines(info.sourceRoot(), entry);
+		if (lines == null) return null;
+
+		if (member == null || member.isEmpty()) {
+			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+		}
+
+		MethodInfo m = findMethod(info, member, descriptor);
+		if (m == null || m.startLine() <= 0) {
+			// Fall back to the full source; the member line info is missing (no debug attribute).
+			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+		}
+		int ctx = Math.max(0, contextLines);
+		int from = Math.max(1, m.startLine() - ctx);
+		int to = Math.min(lines.size(), m.endLine() + 1);
+		String text = String.join("\n", lines.subList(from - 1, to));
+		return new SourceResult(entry, text, from, to, lines.size());
+	}
+
+	private static MethodInfo findMethod(TypeInfo info, String member, String descriptor) {
+		MethodInfo fallback = null;
+		for (MethodInfo m : info.methods()) {
+			if (!member.equals(m.name())) continue;
+			if (descriptor != null && !descriptor.isEmpty()) {
+				if (descriptor.equals(m.descriptor())) return m;
+			} else {
+				// No descriptor filter: prefer the first with real line info, else any.
+				if (m.startLine() > 0 && fallback == null) fallback = m;
+				else if (fallback == null) fallback = m;
+			}
+		}
+		return fallback;
+	}
+
+	private static List<String> readAllLines(String sourceRoot, String entry) throws IOException {
+		java.io.File root = new java.io.File(sourceRoot);
+		if (root.isDirectory()) {
+			java.io.File f = new java.io.File(root, entry);
+			if (!f.isFile()) return null;
+			return java.nio.file.Files.readAllLines(f.toPath());
+		}
+		if (root.isFile() && sourceRoot.endsWith(".jar")) {
+			try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(root)) {
+				java.util.zip.ZipEntry e = zip.getEntry(entry);
+				if (e == null) return null;
+				try (java.io.InputStream in = zip.getInputStream(e);
+						java.io.BufferedReader r = new java.io.BufferedReader(
+							new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8))) {
+					List<String> out = new ArrayList<>();
+					String line;
+					while ((line = r.readLine()) != null) out.add(line);
+					return out;
+				}
+			}
+		}
+		return null;
+	}
+
 }

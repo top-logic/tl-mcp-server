@@ -35,6 +35,8 @@ public final class TypeInfo {
 
 	private final String _sourceFile;
 
+	private final String _sourceRoot;
+
 	private final List<AnnotationInfo> _annotations;
 
 	private final List<MethodInfo> _methods;
@@ -53,6 +55,7 @@ public final class TypeInfo {
 		_enclosing = b.enclosing;
 		_moduleId = b.moduleId;
 		_sourceFile = b.sourceFile;
+		_sourceRoot = b.sourceRoot;
 		_annotations = List.copyOf(b.annotations);
 		_methods = List.copyOf(b.methods);
 		_fields = List.copyOf(b.fields);
@@ -105,6 +108,13 @@ public final class TypeInfo {
 	/** Source file name (from the {@code SourceFile} attribute), or {@code null}. */
 	public String sourceFile() { return _sourceFile; }
 
+	/**
+	 * Filesystem path of the source root that (may) supply this type's source code: a directory
+	 * for reactor modules (typically {@code src/main/java}), the path to a {@code -sources.jar}
+	 * for external dependencies, or {@code null} when no source location is known.
+	 */
+	public String sourceRoot() { return _sourceRoot; }
+
 	public List<AnnotationInfo> annotations() { return _annotations; }
 
 	public List<MethodInfo> methods() { return _methods; }
@@ -130,6 +140,7 @@ public final class TypeInfo {
 		String enclosing;
 		String moduleId;
 		String sourceFile;
+		String sourceRoot;
 		final List<AnnotationInfo> annotations = new ArrayList<>();
 		final List<MethodInfo> methods = new ArrayList<>();
 		final List<FieldInfo> fields = new ArrayList<>();
@@ -174,7 +185,9 @@ public final class TypeInfo {
 			List<CallSite> calls,
 			List<FieldAccess> fieldAccesses,
 			List<String> stringLiterals,
-			List<BodyTypeRef> bodyTypeRefs) {
+			List<BodyTypeRef> bodyTypeRefs,
+			int startLine,
+			int endLine) {
 
 		public Visibility visibility() { return Visibility.of(access); }
 		public boolean isStatic() { return (access & Opcodes.ACC_STATIC) != 0; }

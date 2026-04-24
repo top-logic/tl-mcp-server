@@ -46,6 +46,7 @@ public final class McpTools {
 		server.addTool(callersOf(jsonMapper, graph));
 		server.addTool(fieldAccessors(jsonMapper, graph));
 		server.addTool(moduleOf(jsonMapper, graph));
+		server.addTool(showSource(jsonMapper, graph));
 	}
 
 	// ---------- Tools ----------
@@ -397,6 +398,54 @@ public final class McpTools {
 				result.put("truncated", truncated);
 				result.put("accessors", truncated ? out.subList(0, limit) : out);
 				return jsonResult(json, result);
+			}))
+			.build();
+	}
+
+	private static SyncToolSpecification showSource(McpJsonMapper json, TypeGraph graph) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "fqn": {"type": "string", "description": "FQN of the declaring type."},
+			    "member": {"type": "string", "description": "Optional method name ('<init>' for constructors); omit to return the full source file."},
+			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor to disambiguate overloaded methods."},
+			    "context_lines": {"type": "integer", "default": 30, "description": "Leading context lines (javadoc, annotations) to include before the member header."}
+			  },
+			  "required": ["fqn"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("show_source")
+				.description("Returns the Java source of a type or one of its methods. Pulls from the reactor module's src/main/java or from the companion -sources.jar of an external dependency. JavaDoc is captured naturally by the leading context. Fields and methods without line info fall back to the full source file with text set to the whole class.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler(safe((exchange, request) -> {
+				Map<String, Object> args = request.arguments();
+				String fqn = stringArg(args, "fqn");
+				String member = nullableStringArg(args, "member");
+				String descriptor = nullableStringArg(args, "descriptor");
+				int ctx = intArg(args, "context_lines", 30);
+				try {
+					TypeGraph.SourceResult r = graph.sourceOf(fqn, member, descriptor, ctx);
+					Map<String, Object> result = new LinkedHashMap<>();
+					if (r == null) {
+						result.put("found", false);
+						result.put("fqn", fqn);
+					} else {
+						result.put("found", true);
+						result.put("fqn", fqn);
+						result.put("file", r.file());
+						result.put("startLine", r.startLine());
+						result.put("endLine", r.endLine());
+						result.put("totalLines", r.totalLines());
+						result.put("text", r.text());
+					}
+					return jsonResult(json, result);
+				} catch (java.io.IOException ex) {
+					return errorResult("IO error reading source: " + ex.getMessage());
+				}
 			}))
 			.build();
 	}

@@ -77,13 +77,15 @@ public class ServeMojo extends AbstractMojo {
 		for (MavenProject project : projects) {
 			File outputDir = new File(project.getBuild().getOutputDirectory());
 			if (outputDir.isDirectory() && addOnce(seen, outputDir)) {
-				classpath.add(new BytecodeScanner.Source(outputDir, project.getId()));
+				File sourceDir = new File(project.getBuild().getSourceDirectory());
+				classpath.add(new BytecodeScanner.Source(outputDir, project.getId(),
+					sourceDir.isDirectory() ? sourceDir : null));
 			}
 			try {
 				for (String element : project.getCompileClasspathElements()) {
 					File f = new File(element);
 					if (addOnce(seen, f)) {
-						classpath.add(new BytecodeScanner.Source(f, null));
+						classpath.add(new BytecodeScanner.Source(f, null, companionSources(f)));
 					}
 				}
 			} catch (DependencyResolutionRequiredException ex) {
@@ -120,6 +122,15 @@ public class ServeMojo extends AbstractMojo {
 		}
 		seen.add(f);
 		return true;
+	}
+
+	/** Finds the {@code -sources.jar} sibling of a dependency JAR, if present. */
+	private static File companionSources(File jar) {
+		if (jar == null || !jar.isFile()) return null;
+		String name = jar.getName();
+		if (!name.endsWith(".jar")) return null;
+		File sources = new File(jar.getParentFile(), name.substring(0, name.length() - 4) + "-sources.jar");
+		return sources.isFile() ? sources : null;
 	}
 
 	private void runStdio(TypeGraph graph, McpJsonMapper jsonMapper) {

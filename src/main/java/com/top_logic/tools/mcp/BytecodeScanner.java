@@ -47,8 +47,12 @@ public final class BytecodeScanner {
 		// utility
 	}
 
-	/** One classpath entry annotated with the identifier to tag its classes with. */
-	public record Source(File file, String moduleId) {
+	/**
+	 * One classpath entry annotated with the identifier to tag its classes with, plus the
+	 * companion source location (directory for reactor modules, {@code -sources.jar} for external
+	 * JARs, {@code null} when unavailable).
+	 */
+	public record Source(File file, String moduleId, File sourceRoot) {
 	}
 
 	public static Map<String, TypeInfo> scan(List<Source> classpath, boolean includeJdk, boolean scanBodies)
@@ -56,10 +60,11 @@ public final class BytecodeScanner {
 		Map<String, TypeInfo.Builder> builders = new HashMap<>();
 		for (Source source : classpath) {
 			File entry = source.file();
+			String sourceRoot = source.sourceRoot() == null ? null : source.sourceRoot().getAbsolutePath();
 			if (entry.isDirectory()) {
-				scanDirectory(entry.toPath(), source.moduleId(), scanBodies, builders);
+				scanDirectory(entry.toPath(), source.moduleId(), sourceRoot, scanBodies, builders);
 			} else if (entry.isFile() && entry.getName().endsWith(".jar")) {
-				scanJar(entry, source.moduleId(), scanBodies, builders);
+				scanJar(entry, source.moduleId(), sourceRoot, scanBodies, builders);
 			}
 		}
 		if (includeJdk) {
@@ -68,7 +73,7 @@ public final class BytecodeScanner {
 		return finalise(builders);
 	}
 
-	private static void scanDirectory(Path root, String moduleId, boolean scanBodies,
+	private static void scanDirectory(Path root, String moduleId, String sourceRoot, boolean scanBodies,
 			Map<String, TypeInfo.Builder> out) throws IOException {
 		if (!Files.isDirectory(root)) {
 			return;
@@ -76,20 +81,20 @@ public final class BytecodeScanner {
 		try (Stream<Path> stream = Files.walk(root)) {
 			stream
 				.filter(p -> p.getFileName() != null && p.getFileName().toString().endsWith(".class"))
-				.forEach(p -> readFile(p, moduleId, scanBodies, out));
+				.forEach(p -> readFile(p, moduleId, sourceRoot, scanBodies, out));
 		}
 	}
 
-	private static void readFile(Path classFile, String moduleId, boolean scanBodies,
+	private static void readFile(Path classFile, String moduleId, String sourceRoot, boolean scanBodies,
 			Map<String, TypeInfo.Builder> out) {
 		try (InputStream in = Files.newInputStream(classFile)) {
-			ingest(in, moduleId, scanBodies, out);
+			ingest(in, moduleId, sourceRoot, scanBodies, out);
 		} catch (IOException | RuntimeException ex) {
 			// swallow single-file failures
 		}
 	}
 
-	private static void scanJar(File jar, String fallbackModuleId, boolean scanBodies,
+	private static void scanJar(File jar, String fallbackModuleId, String sourceRoot, boolean scanBodies,
 			Map<String, TypeInfo.Builder> out) throws IOException {
 		try (ZipFile zip = new ZipFile(jar)) {
 			String moduleId = readGav(zip);
@@ -99,7 +104,7 @@ public final class BytecodeScanner {
 			String finalModuleId = moduleId;
 			zip.stream()
 				.filter(e -> !e.isDirectory() && e.getName().endsWith(".class"))
-				.forEach(e -> readZipEntry(zip, e, finalModuleId, scanBodies, out));
+				.forEach(e -> readZipEntry(zip, e, finalModuleId, sourceRoot, scanBodies, out));
 		}
 	}
 
@@ -133,10 +138,10 @@ public final class BytecodeScanner {
 		return v == null ? g + ":" + a : g + ":" + a + ":" + v;
 	}
 
-	private static void readZipEntry(ZipFile zip, ZipEntry entry, String moduleId, boolean scanBodies,
-			Map<String, TypeInfo.Builder> out) {
+	private static void readZipEntry(ZipFile zip, ZipEntry entry, String moduleId, String sourceRoot,
+			boolean scanBodies, Map<String, TypeInfo.Builder> out) {
 		try (InputStream in = zip.getInputStream(entry)) {
-			ingest(in, moduleId, scanBodies, out);
+			ingest(in, moduleId, sourceRoot, scanBodies, out);
 		} catch (IOException | RuntimeException ex) {
 			// swallow
 		}
@@ -157,16 +162,17 @@ public final class BytecodeScanner {
 			try (Stream<Path> stream = Files.walk(root)) {
 				stream
 					.filter(p -> p.getFileName() != null && p.getFileName().toString().endsWith(".class"))
-					.forEach(p -> readFile(p, "jdk", scanBodies, out));
+					.forEach(p -> readFile(p, "jdk", null, scanBodies, out));
 			}
 		}
 	}
 
-	private static void ingest(InputStream in, String moduleId, boolean scanBodies,
+	private static void ingest(InputStream in, String moduleId, String sourceRoot, boolean scanBodies,
 			Map<String, TypeInfo.Builder> out) throws IOException {
 		ClassReader reader = new ClassReader(in);
 		TypeInfo.Builder builder = new TypeInfo.Builder();
 		builder.moduleId = moduleId;
+		builder.sourceRoot = sourceRoot;
 		int flags = scanBodies ? ClassReader.SKIP_FRAMES : ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES;
 		reader.accept(new IndexingVisitor(builder, scanBodies), flags);
 		if (builder.name != null) {
@@ -315,6 +321,7 @@ public final class BytecodeScanner {
 			List<TypeInfo.FieldAccess> fieldAccesses = _scanBodies ? new ArrayList<>() : List.of();
 			List<String> literals = _scanBodies ? new ArrayList<>() : List.of();
 			List<TypeInfo.BodyTypeRef> bodyTypeRefs = _scanBodies ? new ArrayList<>() : List.of();
+			int[] lineRange = new int[] { -1, -1 };
 
 			int finalAccess = access;
 			String finalName = name;
@@ -387,6 +394,12 @@ public final class BytecodeScanner {
 				}
 
 				@Override
+				public void visitLineNumber(int line, Label start) {
+					if (lineRange[0] < 0 || line < lineRange[0]) lineRange[0] = line;
+					if (line > lineRange[1]) lineRange[1] = line;
+				}
+
+				@Override
 				public void visitLocalVariable(String varName, String varDesc, String varSig, Label start,
 						Label end, int index) {
 					if (varName == null || "this".equals(varName)) return;
@@ -407,7 +420,7 @@ public final class BytecodeScanner {
 					_target.methods.add(new TypeInfo.MethodInfo(
 						finalName, finalDescriptor, finalAccess,
 						finalReturnType, List.copyOf(params), exList, anns, calls, fieldAccesses, literals,
-						bodyTypeRefs));
+						bodyTypeRefs, lineRange[0], lineRange[1]));
 				}
 			};
 		}
