@@ -58,10 +58,10 @@ public class TypeGraph {
 	/** "owner#name" → writers. */
 	private final Map<String, List<AccessorRef>> _fieldWriters = new HashMap<>();
 
-	public record CallerRef(String ownerType, String method, String descriptor) {
+	public record CallerRef(String ownerType, String method, String descriptor, int count) {
 	}
 
-	public record AccessorRef(String ownerType, String method, String descriptor) {
+	public record AccessorRef(String ownerType, String method, String descriptor, int count) {
 	}
 
 	/** Kind of usage site recorded in {@link #referencesTo(String, Set, String, int)}. */
@@ -97,7 +97,8 @@ public class TypeGraph {
 			String descriptor,
 			String targetMember,
 			String targetDescriptor,
-			UsageKind kind) {
+			UsageKind kind,
+			int count) {
 	}
 
 	private TypeGraph(Map<String, TypeInfo> types) {
@@ -120,27 +121,28 @@ public class TypeGraph {
 	private void collectReferences(TypeInfo info) {
 		String owner = info.name();
 		if (info.superclass() != null)
-			addUsage(info.superclass(), new Usage(owner, null, null, null, null, UsageKind.SUPERTYPE));
+			addUsage(info.superclass(), new Usage(owner, null, null, null, null, UsageKind.SUPERTYPE, 1));
 		for (String iface : info.interfaces())
-			addUsage(iface, new Usage(owner, null, null, null, null, UsageKind.SUPERTYPE));
+			addUsage(iface, new Usage(owner, null, null, null, null, UsageKind.SUPERTYPE, 1));
 		for (AnnotationInfo ann : info.annotations())
-			addUsage(ann.name(), new Usage(owner, null, null, null, null, UsageKind.TYPE_ANNOTATION));
+			addUsage(ann.name(), new Usage(owner, null, null, null, null, UsageKind.TYPE_ANNOTATION, 1));
 
 		for (MethodInfo m : info.methods()) {
 			String mName = m.name(), mDesc = m.descriptor();
-			addTypedUsage(m.returnType(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_RETURN));
+			addTypedUsage(m.returnType(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_RETURN, 1));
 			for (Parameter p : m.parameters())
-				addTypedUsage(p.type(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_PARAMETER));
+				addTypedUsage(p.type(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_PARAMETER, 1));
 			for (String ex : m.exceptions())
-				addUsage(ex, new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_EXCEPTION));
+				addUsage(ex, new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_EXCEPTION, 1));
 			for (AnnotationInfo ann : m.annotations())
-				addUsage(ann.name(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_ANNOTATION));
+				addUsage(ann.name(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_ANNOTATION, 1));
 		}
 
 		for (FieldInfo f : info.fields()) {
-			addTypedUsage(f.type(), new Usage(owner, f.name(), null, null, null, UsageKind.FIELD_TYPE));
+			addTypedUsage(f.type(), new Usage(owner, f.name(), null, null, null, UsageKind.FIELD_TYPE, 1));
 			for (AnnotationInfo ann : f.annotations())
-				addUsage(ann.name(), new Usage(owner, f.name(), null, null, null, UsageKind.FIELD_ANNOTATION));
+				addUsage(ann.name(),
+					new Usage(owner, f.name(), null, null, null, UsageKind.FIELD_ANNOTATION, 1));
 		}
 	}
 
@@ -150,17 +152,17 @@ public class TypeGraph {
 			String mName = m.name(), mDesc = m.descriptor();
 			for (CallSite call : m.calls()) {
 				addTypedUsage(call.owner(), new Usage(owner, mName, mDesc,
-					call.name(), call.descriptor(), UsageKind.CALL_DISPATCH));
+					call.name(), call.descriptor(), UsageKind.CALL_DISPATCH, 1));
 				String key = call.owner() + "#" + call.name() + "#" + call.descriptor();
 				_callers.computeIfAbsent(key, k -> new ArrayList<>())
-					.add(new CallerRef(owner, mName, mDesc));
+					.add(new CallerRef(owner, mName, mDesc, 1));
 			}
 			for (FieldAccess fa : m.fieldAccesses()) {
 				UsageKind uk = fa.write() ? UsageKind.FIELD_WRITE : UsageKind.FIELD_READ;
 				addTypedUsage(fa.owner(), new Usage(owner, mName, mDesc,
-					fa.name(), fa.descriptor(), uk));
+					fa.name(), fa.descriptor(), uk, 1));
 				String key = fa.owner() + "#" + fa.name();
-				AccessorRef ref = new AccessorRef(owner, mName, mDesc);
+				AccessorRef ref = new AccessorRef(owner, mName, mDesc, 1);
 				if (fa.write()) {
 					_fieldWriters.computeIfAbsent(key, k -> new ArrayList<>()).add(ref);
 				} else {
@@ -174,7 +176,7 @@ public class TypeGraph {
 					case INSTANCEOF -> UsageKind.INSTANCEOF;
 					case CATCH -> UsageKind.CATCH;
 				};
-				addTypedUsage(btr.type(), new Usage(owner, mName, mDesc, null, null, uk));
+				addTypedUsage(btr.type(), new Usage(owner, mName, mDesc, null, null, uk, 1));
 			}
 		}
 	}
@@ -321,7 +323,10 @@ public class TypeGraph {
 		boolean filterKinds = kinds != null && !kinds.isEmpty();
 		boolean filterModule = ownerModule != null && !ownerModule.isEmpty();
 
-		List<Usage> filtered = new ArrayList<>();
+		// First pass: apply filters and aggregate duplicate (owner, member, descriptor, target,
+		// kind) into counts, preserving first-occurrence order.
+		Map<String, int[]> counts = new LinkedHashMap<>();
+		Map<String, Usage> firstSeen = new LinkedHashMap<>();
 		Map<UsageKind, Integer> byKind = new LinkedHashMap<>();
 		for (Usage u : all) {
 			if (filterKinds && !kinds.contains(u.kind())) continue;
@@ -330,43 +335,95 @@ public class TypeGraph {
 				TypeInfo owner = _types.get(u.ownerType());
 				if (owner == null || !ownerModule.equals(owner.moduleId())) continue;
 			}
-			filtered.add(u);
-			byKind.merge(u.kind(), 1, Integer::sum);
+			String key = usageKey(u);
+			counts.computeIfAbsent(key, k -> new int[1])[0] += u.count();
+			firstSeen.putIfAbsent(key, u);
+			byKind.merge(u.kind(), u.count(), Integer::sum);
 		}
-		int total = filtered.size();
+		List<Usage> aggregated = new ArrayList<>(counts.size());
+		for (Map.Entry<String, Usage> e : firstSeen.entrySet()) {
+			Usage u = e.getValue();
+			aggregated.add(new Usage(u.ownerType(), u.member(), u.descriptor(),
+				u.targetMember(), u.targetDescriptor(), u.kind(), counts.get(e.getKey())[0]));
+		}
+		int total = aggregated.size();
 		boolean truncated = false;
 		if (limit > 0 && total > limit) {
-			filtered = new ArrayList<>(filtered.subList(0, limit));
+			aggregated = new ArrayList<>(aggregated.subList(0, limit));
 			truncated = true;
 		}
-		return new UsageResult(filtered, total, truncated, byKind);
+		return new UsageResult(aggregated, total, truncated, byKind);
+	}
+
+	private static String usageKey(Usage u) {
+		return u.ownerType() + "\0"
+			+ (u.member() == null ? "" : u.member()) + "\0"
+			+ (u.descriptor() == null ? "" : u.descriptor()) + "\0"
+			+ (u.targetMember() == null ? "" : u.targetMember()) + "\0"
+			+ (u.targetDescriptor() == null ? "" : u.targetDescriptor()) + "\0"
+			+ u.kind().name();
 	}
 
 	public record UsageResult(List<Usage> usages, int total, boolean truncated, Map<UsageKind, Integer> byKind) {
 	}
 
 	public List<CallerRef> callersOf(String owner, String method, String descriptor) {
+		List<CallerRef> raw;
 		if (descriptor != null && !descriptor.isEmpty()) {
-			List<CallerRef> direct = _callers.get(owner + "#" + method + "#" + descriptor);
-			return direct == null ? List.of() : new ArrayList<>(direct);
+			raw = _callers.get(owner + "#" + method + "#" + descriptor);
+		} else {
+			raw = new ArrayList<>();
+			String prefix = owner + "#" + method + "#";
+			for (Map.Entry<String, List<CallerRef>> e : _callers.entrySet()) {
+				if (e.getKey().startsWith(prefix)) raw.addAll(e.getValue());
+			}
 		}
-		// method-only: union over all descriptors
-		List<CallerRef> all = new ArrayList<>();
-		String prefix = owner + "#" + method + "#";
-		for (Map.Entry<String, List<CallerRef>> e : _callers.entrySet()) {
-			if (e.getKey().startsWith(prefix)) all.addAll(e.getValue());
-		}
-		return all;
+		return raw == null ? List.of() : aggregateCallers(raw);
 	}
 
 	public List<AccessorRef> fieldReaders(String owner, String field) {
 		List<AccessorRef> r = _fieldReaders.get(owner + "#" + field);
-		return r == null ? List.of() : new ArrayList<>(r);
+		return r == null ? List.of() : aggregateAccessors(r);
 	}
 
 	public List<AccessorRef> fieldWriters(String owner, String field) {
 		List<AccessorRef> r = _fieldWriters.get(owner + "#" + field);
-		return r == null ? List.of() : new ArrayList<>(r);
+		return r == null ? List.of() : aggregateAccessors(r);
+	}
+
+	private static List<CallerRef> aggregateCallers(List<CallerRef> raw) {
+		Map<String, int[]> counts = new LinkedHashMap<>();
+		for (CallerRef c : raw) {
+			counts.computeIfAbsent(c.ownerType() + "\0" + c.method() + "\0" + c.descriptor(),
+				k -> new int[1])[0] += c.count();
+		}
+		List<CallerRef> out = new ArrayList<>(counts.size());
+		// Iterate raw once to preserve first-occurrence order, skipping already-emitted identities.
+		Set<String> seen = new HashSet<>();
+		for (CallerRef c : raw) {
+			String key = c.ownerType() + "\0" + c.method() + "\0" + c.descriptor();
+			if (seen.add(key)) {
+				out.add(new CallerRef(c.ownerType(), c.method(), c.descriptor(), counts.get(key)[0]));
+			}
+		}
+		return out;
+	}
+
+	private static List<AccessorRef> aggregateAccessors(List<AccessorRef> raw) {
+		Map<String, int[]> counts = new LinkedHashMap<>();
+		for (AccessorRef a : raw) {
+			counts.computeIfAbsent(a.ownerType() + "\0" + a.method() + "\0" + a.descriptor(),
+				k -> new int[1])[0] += a.count();
+		}
+		List<AccessorRef> out = new ArrayList<>(counts.size());
+		Set<String> seen = new HashSet<>();
+		for (AccessorRef a : raw) {
+			String key = a.ownerType() + "\0" + a.method() + "\0" + a.descriptor();
+			if (seen.add(key)) {
+				out.add(new AccessorRef(a.ownerType(), a.method(), a.descriptor(), counts.get(key)[0]));
+			}
+		}
+		return out;
 	}
 
 	// ---------- Query ----------

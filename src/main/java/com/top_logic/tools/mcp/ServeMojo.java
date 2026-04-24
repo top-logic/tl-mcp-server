@@ -386,6 +386,7 @@ public class ServeMojo extends AbstractMojo {
 						if (u.targetMember() != null) e.put("target_member", u.targetMember());
 						if (u.targetDescriptor() != null) e.put("target_descriptor", u.targetDescriptor());
 						e.put("kind", u.kind().name().toLowerCase());
+						e.put("count", u.count());
 						out.add(e);
 					}
 					Map<String, Integer> histogram = new LinkedHashMap<>();
@@ -456,6 +457,7 @@ public class ServeMojo extends AbstractMojo {
 					e.put("type", ref.ownerType());
 					e.put("method", ref.method());
 					e.put("descriptor", ref.descriptor());
+					e.put("count", ref.count());
 					out.add(e);
 				}
 				Map<String, Object> result = new LinkedHashMap<>();
@@ -505,6 +507,7 @@ public class ServeMojo extends AbstractMojo {
 						e.put("method", r.method());
 						e.put("descriptor", r.descriptor());
 						e.put("mode", "read");
+						e.put("count", r.count());
 						out.add(e);
 					}
 				}
@@ -515,6 +518,7 @@ public class ServeMojo extends AbstractMojo {
 						e.put("method", r.method());
 						e.put("descriptor", r.descriptor());
 						e.put("mode", "write");
+						e.put("count", r.count());
 						out.add(e);
 					}
 				}
