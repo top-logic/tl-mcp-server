@@ -216,7 +216,11 @@ public class ServeMojo extends AbstractMojo {
 			    "annotated_with": {"type": "array", "items": {"type": "string"}, "description": "Require every listed annotation."},
 			    "in_module": {"type": "string", "description": "Restrict to a module/JAR id ('groupId:artifactId[:version]' or a Maven project id)."},
 			    "kind": {"type": "string", "enum": ["any", "class", "interface", "concrete", "enum", "annotation"], "default": "any"},
-			    "public_only": {"type": "boolean", "default": true},
+			    "visibility": {
+			      "type": "array",
+			      "items": {"type": "string", "enum": ["public", "protected", "package", "private"]},
+			      "description": "Java access levels to include. Default: public only. Pass multiple values or all four to widen."
+			    },
 			    "limit": {"type": "integer", "default": 100}
 			  }
 			}
@@ -240,7 +244,7 @@ public class ServeMojo extends AbstractMojo {
 						stringListArg(args, "annotated_with"),
 						nullableStringArg(args, "in_module"),
 						kindArg(args, "kind"),
-						boolArg(args, "public_only", true),
+						visibilitiesArg(args, "visibility", true),
 						intArg(args, "limit", 100));
 					TypeGraph.QueryResult r = graph.query(q);
 					Map<String, Object> result = new LinkedHashMap<>();
@@ -300,7 +304,15 @@ public class ServeMojo extends AbstractMojo {
 			    "type": {"type": "string", "description": "For fields: the field type FQN. For methods: the return type FQN."},
 			    "parameter_type": {"type": "string", "description": "Method must accept at least one parameter of this FQN. Fields are excluded when set."},
 			    "annotated_with": {"type": "array", "items": {"type": "string"}, "description": "Member must carry every listed annotation."},
-			    "public_only": {"type": "boolean", "default": false},
+			    "visibility": {
+			      "type": "array",
+			      "items": {"type": "string", "enum": ["public", "protected", "package", "private"]},
+			      "description": "Java access levels to include. Default: all four."
+			    },
+			    "static": {
+			      "type": "boolean",
+			      "description": "Tri-state: true = only static members, false = only instance members, omitted = both."
+			    },
 			    "limit": {"type": "integer", "default": 100}
 			  },
 			  "required": ["fqn"]
@@ -324,7 +336,8 @@ public class ServeMojo extends AbstractMojo {
 						nullableStringArg(args, "type"),
 						nullableStringArg(args, "parameter_type"),
 						stringListArg(args, "annotated_with"),
-						boolArg(args, "public_only", false),
+						visibilitiesArg(args, "visibility", false),
+						nullableBoolArg(args, "static"),
 						intArg(args, "limit", 100));
 					Map<String, Object> desc = graph.describeMembers(fqn, mq);
 					Map<String, Object> result = new LinkedHashMap<>();
@@ -626,6 +639,43 @@ public class ServeMojo extends AbstractMojo {
 		if (v == null) return defaultValue;
 		if (v instanceof Boolean b) return b;
 		return Boolean.parseBoolean(v.toString());
+	}
+
+	private static Boolean nullableBoolArg(Map<String, Object> args, String key) {
+		Object v = args.get(key);
+		if (v == null) return null;
+		if (v instanceof Boolean b) return b;
+		String s = v.toString().trim().toLowerCase();
+		if (s.isEmpty()) return null;
+		return Boolean.valueOf(s);
+	}
+
+	/**
+	 * @param publicOnlyDefault
+	 *        When the caller omits 'visibility', restrict to public only ({@code true}) or allow
+	 *        any level ({@code false}). An empty array also means "any level".
+	 */
+	private static Set<TypeInfo.Visibility> visibilitiesArg(Map<String, Object> args, String key,
+			boolean publicOnlyDefault) {
+		Object v = args.get(key);
+		if (v == null) {
+			return publicOnlyDefault ? java.util.EnumSet.of(TypeInfo.Visibility.PUBLIC) : Set.of();
+		}
+		List<?> items = v instanceof List<?> list ? list : List.of(v);
+		if (items.isEmpty()) return Set.of();
+		Set<TypeInfo.Visibility> out = java.util.EnumSet.noneOf(TypeInfo.Visibility.class);
+		for (Object item : items) {
+			if (item == null) continue;
+			String s = item.toString().trim().toUpperCase();
+			if (s.isEmpty()) continue;
+			try {
+				out.add(TypeInfo.Visibility.valueOf(s));
+			} catch (IllegalArgumentException ex) {
+				throw new IllegalArgumentException("Invalid visibility '" + item
+					+ "'; expected one of public/protected/package/private.");
+			}
+		}
+		return out;
 	}
 
 	private static int intArg(Map<String, Object> args, String key, int defaultValue) {

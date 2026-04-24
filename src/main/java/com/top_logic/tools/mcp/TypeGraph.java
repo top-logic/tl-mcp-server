@@ -474,7 +474,7 @@ public class TypeGraph {
 			List<String> annotatedWith,
 			String inModule,
 			Kind kind,
-			boolean publicOnly,
+			Set<TypeInfo.Visibility> visibilities,
 			int limit) {
 	}
 
@@ -516,6 +516,8 @@ public class TypeGraph {
 		List<String> required = q.annotatedWith();
 		boolean hasRequired = required != null && !required.isEmpty();
 		String moduleFilter = q.inModule();
+		Set<TypeInfo.Visibility> vis = q.visibilities();
+		boolean filterVisibility = vis != null && !vis.isEmpty();
 
 		List<String> result = new ArrayList<>();
 		for (String fqn : candidates) {
@@ -524,7 +526,7 @@ public class TypeGraph {
 			if (nameMatches != null && !nameMatches.contains(fqn)) continue;
 			if (pattern != null && !pattern.matcher(fqn).find()) continue;
 			if (needle != null && !fqn.toLowerCase().contains(needle)) continue;
-			if (q.publicOnly() && !info.isPublic()) continue;
+			if (filterVisibility && !vis.contains(info.visibility())) continue;
 			if (moduleFilter != null && !moduleFilter.isEmpty() && !moduleFilter.equals(info.moduleId())) continue;
 			switch (kind) {
 				case CLASS -> { if (info.isInterface()) continue; }
@@ -565,9 +567,9 @@ public class TypeGraph {
 		out.put("name", fqn);
 		out.put("module", info.moduleId());
 		if (info.sourceFile() != null) out.put("sourceFile", info.sourceFile());
-		out.put("public", info.isPublic());
-		out.put("interface", info.isInterface());
-		out.put("abstract", info.isAbstract());
+		out.put("visibility", info.visibility().name().toLowerCase());
+		if (info.isInterface()) out.put("interface", true);
+		if (info.isAbstract() && !info.isInterface()) out.put("abstract", true);
 		if (info.isEnum()) out.put("enum", true);
 		if (info.isAnnotation()) out.put("annotation", true);
 		if (info.isFinal()) out.put("final", true);
@@ -598,7 +600,8 @@ public class TypeGraph {
 			String type,
 			String parameterType,
 			List<String> annotatedWith,
-			boolean publicOnly,
+			Set<TypeInfo.Visibility> visibilities,
+			Boolean staticOnly,
 			int limit) {
 	}
 
@@ -622,13 +625,17 @@ public class TypeGraph {
 		MemberKind kind = q.kind() == null ? MemberKind.ANY : q.kind();
 		List<String> required = q.annotatedWith() == null ? List.of() : q.annotatedWith();
 		boolean paramTypeFilter = q.parameterType() != null && !q.parameterType().isEmpty();
+		Set<TypeInfo.Visibility> vis = q.visibilities();
+		boolean filterVisibility = vis != null && !vis.isEmpty();
+		Boolean staticOnly = q.staticOnly();
 
 		List<Map<String, Object>> methods = new ArrayList<>();
 		int totalMethods = 0;
 		if (kind != MemberKind.FIELD) {
 			for (MethodInfo m : info.methods()) {
 				if (!memberNameMatches(m.name(), q.name(), pattern, needle)) continue;
-				if (q.publicOnly() && !m.isPublic()) continue;
+				if (filterVisibility && !vis.contains(m.visibility())) continue;
+				if (staticOnly != null && staticOnly.booleanValue() != m.isStatic()) continue;
 				if (q.type() != null && !q.type().isEmpty() && !q.type().equals(m.returnType())) continue;
 				if (paramTypeFilter && !hasParameterOfType(m, q.parameterType())) continue;
 				if (!hasAllAnnotations(m.annotations(), required)) continue;
@@ -644,7 +651,8 @@ public class TypeGraph {
 		if (kind != MemberKind.METHOD && !paramTypeFilter) {
 			for (FieldInfo f : info.fields()) {
 				if (!memberNameMatches(f.name(), q.name(), pattern, needle)) continue;
-				if (q.publicOnly() && !f.isPublic()) continue;
+				if (filterVisibility && !vis.contains(f.visibility())) continue;
+				if (staticOnly != null && staticOnly.booleanValue() != f.isStatic()) continue;
 				if (q.type() != null && !q.type().isEmpty() && !q.type().equals(f.type())) continue;
 				if (!hasAllAnnotations(f.annotations(), required)) continue;
 				totalFields++;
@@ -716,9 +724,7 @@ public class TypeGraph {
 		}
 		mm.put("parameters", paramList);
 		if (!m.exceptions().isEmpty()) mm.put("exceptions", new ArrayList<>(m.exceptions()));
-		mm.put("public", m.isPublic());
-		if (m.isProtected()) mm.put("protected", true);
-		if (m.isPrivate()) mm.put("private", true);
+		mm.put("visibility", m.visibility().name().toLowerCase());
 		if (m.isStatic()) mm.put("static", true);
 		if (m.isAbstract()) mm.put("abstract", true);
 		if (m.isFinal()) mm.put("final", true);
@@ -734,9 +740,7 @@ public class TypeGraph {
 		Map<String, Object> ff = new LinkedHashMap<>();
 		ff.put("name", f.name());
 		ff.put("type", f.type());
-		ff.put("public", f.isPublic());
-		if (f.isProtected()) ff.put("protected", true);
-		if (f.isPrivate()) ff.put("private", true);
+		ff.put("visibility", f.visibility().name().toLowerCase());
 		if (f.isStatic()) ff.put("static", true);
 		if (f.isFinal()) ff.put("final", true);
 		if (f.isEnumConstant()) ff.put("enumConstant", true);

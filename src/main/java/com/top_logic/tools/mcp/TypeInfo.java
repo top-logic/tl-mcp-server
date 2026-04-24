@@ -61,12 +61,25 @@ public final class TypeInfo {
 
 	public String name() { return _name; }
 	public int access() { return _access; }
+	public Visibility visibility() { return Visibility.of(_access); }
 	public boolean isPublic() { return (_access & Opcodes.ACC_PUBLIC) != 0; }
 	public boolean isInterface() { return (_access & Opcodes.ACC_INTERFACE) != 0; }
 	public boolean isAbstract() { return (_access & Opcodes.ACC_ABSTRACT) != 0; }
 	public boolean isEnum() { return (_access & Opcodes.ACC_ENUM) != 0; }
 	public boolean isAnnotation() { return (_access & Opcodes.ACC_ANNOTATION) != 0; }
 	public boolean isFinal() { return (_access & Opcodes.ACC_FINAL) != 0; }
+
+	/** Java access level derived from ACC_* flags. */
+	public enum Visibility {
+		PUBLIC, PROTECTED, PACKAGE, PRIVATE;
+
+		public static Visibility of(int access) {
+			if ((access & Opcodes.ACC_PUBLIC) != 0) return PUBLIC;
+			if ((access & Opcodes.ACC_PROTECTED) != 0) return PROTECTED;
+			if ((access & Opcodes.ACC_PRIVATE) != 0) return PRIVATE;
+			return PACKAGE;
+		}
+	}
 
 	/** FQN of the direct superclass, or {@code null} (for interfaces or {@code java.lang.Object}). */
 	public String superclass() { return _superclass; }
@@ -163,9 +176,7 @@ public final class TypeInfo {
 			List<String> stringLiterals,
 			List<BodyTypeRef> bodyTypeRefs) {
 
-		public boolean isPublic() { return (access & Opcodes.ACC_PUBLIC) != 0; }
-		public boolean isProtected() { return (access & Opcodes.ACC_PROTECTED) != 0; }
-		public boolean isPrivate() { return (access & Opcodes.ACC_PRIVATE) != 0; }
+		public Visibility visibility() { return Visibility.of(access); }
 		public boolean isStatic() { return (access & Opcodes.ACC_STATIC) != 0; }
 		public boolean isAbstract() { return (access & Opcodes.ACC_ABSTRACT) != 0; }
 		public boolean isFinal() { return (access & Opcodes.ACC_FINAL) != 0; }
@@ -180,9 +191,7 @@ public final class TypeInfo {
 			Object constantValue,
 			List<AnnotationInfo> annotations) {
 
-		public boolean isPublic() { return (access & Opcodes.ACC_PUBLIC) != 0; }
-		public boolean isProtected() { return (access & Opcodes.ACC_PROTECTED) != 0; }
-		public boolean isPrivate() { return (access & Opcodes.ACC_PRIVATE) != 0; }
+		public Visibility visibility() { return Visibility.of(access); }
 		public boolean isStatic() { return (access & Opcodes.ACC_STATIC) != 0; }
 		public boolean isFinal() { return (access & Opcodes.ACC_FINAL) != 0; }
 		public boolean isEnumConstant() { return (access & Opcodes.ACC_ENUM) != 0; }
