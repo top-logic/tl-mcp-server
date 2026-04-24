@@ -281,10 +281,9 @@ public final class McpTools {
 			  "type": "object",
 			  "properties": {
 			    "owner": {"type": "string", "description": "FQN of the class declaring the method."},
-			    "method": {"type": "string", "description": "Method name (or '<init>' for constructors)."},
-			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor; omit to match all overloads."},
-			    "include_overrides": {"type": "boolean", "default": true, "description": "When true (default), also return call sites whose static owner is a subtype that declares an override with matching name and descriptor."},
-			    "owner_pattern": {"type": "string", "description": "Java regex (Matcher.find) against the caller's owning class FQN."},
+			    "method": {"type": "string", "description": "Method name, optionally with a parameter list to pick a specific overload: 'foo', 'foo(String)', 'foo(java.util.List, int)'. Use '<init>' for constructors."},
+			    "include_overrides": {"type": "boolean", "default": true, "description": "When true (default), also return call sites whose static owner is a subtype that declares an override with matching signature."},
+			    "owner_pattern": {"type": "string", "description": "Java regex against the caller's owning class FQN."},
 			    "in_module": {"type": "string", "description": "Restrict to callers whose owning class lives in this module id."},
 			    "limit": {"type": "integer", "default": 200}
 			  },
@@ -301,13 +300,12 @@ public final class McpTools {
 				Map<String, Object> args = request.arguments();
 				String owner = stringArg(args, "owner");
 				String method = stringArg(args, "method");
-				String descriptor = nullableStringArg(args, "descriptor");
 				boolean includeOverrides = boolArg(args, "include_overrides", true);
 				String ownerPattern = nullableStringArg(args, "owner_pattern");
 				String ownerModule = nullableStringArg(args, "in_module");
 				int limit = intArg(args, "limit", 200);
 				Pattern pattern = compilePattern(ownerPattern);
-				List<TypeGraph.CallerRef> callers = graph.callersOf(owner, method, descriptor, includeOverrides);
+				List<TypeGraph.CallerRef> callers = graph.callersOf(owner, method, includeOverrides);
 				List<Map<String, Object>> out = new ArrayList<>();
 				for (TypeGraph.CallerRef ref : callers) {
 					if (pattern != null && !pattern.matcher(ref.ownerType()).find()) continue;
@@ -322,7 +320,6 @@ public final class McpTools {
 				Map<String, Object> result = new LinkedHashMap<>();
 				result.put("owner", owner);
 				result.put("method", method);
-				if (descriptor != null) result.put("descriptor", descriptor);
 				result.put("total", out.size());
 				boolean truncated = limit > 0 && out.size() > limit;
 				result.put("truncated", truncated);
@@ -409,8 +406,7 @@ public final class McpTools {
 			  "type": "object",
 			  "properties": {
 			    "fqn": {"type": "string", "description": "FQN of the declaring type."},
-			    "member": {"type": "string", "description": "Optional method name; omit for a class-level query."},
-			    "descriptor": {"type": "string", "description": "Optional bytecode descriptor to disambiguate overloads."},
+			    "member": {"type": "string", "description": "Method name, optionally with a source-level parameter list to disambiguate overloads: 'setToolBar', 'setToolBar(ToolBar)', 'setToolBar(com.top_logic.layout.ToolBar)', 'foo(String, int)'. Simple names and FQNs both match; generics are ignored. Omit for a class-level query."},
 			    "mode": {"type": "string", "enum": ["auto", "doc", "source"], "default": "auto"},
 			    "context_lines": {"type": "integer", "default": 0, "description": "Leading context lines before the declaration. 0 = auto (anchor at the attached javadoc/annotation block)."}
 			  },
@@ -427,11 +423,10 @@ public final class McpTools {
 				Map<String, Object> args = request.arguments();
 				String fqn = stringArg(args, "fqn");
 				String member = nullableStringArg(args, "member");
-				String descriptor = nullableStringArg(args, "descriptor");
 				int ctx = intArg(args, "context_lines", 0);
 				TypeGraph.SourceMode mode = sourceModeArg(args, "mode");
 				try {
-					TypeGraph.SourceResult r = graph.sourceOf(fqn, member, descriptor, mode, ctx);
+					TypeGraph.SourceResult r = graph.sourceOf(fqn, member, mode, ctx);
 					Map<String, Object> result = new LinkedHashMap<>();
 					if (r == null) {
 						result.put("found", false);

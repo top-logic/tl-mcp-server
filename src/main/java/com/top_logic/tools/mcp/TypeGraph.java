@@ -368,49 +368,67 @@ public class TypeGraph {
 	}
 
 	/**
+	 * Find all recorded call sites that invoke the given method.
+	 *
+	 * @param methodSpec
+	 *        Method name, optionally with a source-level parameter list
+	 *        ({@code "setToolBar(ToolBar)"}). Without parameters, all overloads are included.
 	 * @param includeOverrides
-	 *        When {@code true}, the result also contains calls statically dispatched through any
-	 *        subtype of {@code owner} that declares a method with matching name (and descriptor
-	 *        when given). Bytecode records each call against its declared static-type owner, so
-	 *        a {@code this.foo()} call inside an overriding subclass would not match the
-	 *        supertype otherwise.
+	 *        When {@code true}, also include calls statically dispatched through any subtype of
+	 *        {@code owner} that declares a method with matching name (and — if the spec carries
+	 *        parameters — matching parameter types).
 	 */
-	public List<CallerRef> callersOf(String owner, String method, String descriptor, boolean includeOverrides) {
+	public List<CallerRef> callersOf(String owner, String methodSpec, boolean includeOverrides) {
+		MemberSpec spec = MemberSpec.parse(methodSpec);
+		if (spec == null) return List.of();
+
+		TypeInfo ownerInfo = _types.get(owner);
+		String resolvedDescriptor = null;
+		if (ownerInfo != null && spec.paramTypes() != null) {
+			MethodInfo m = resolveMethod(ownerInfo, spec);
+			if (m != null) resolvedDescriptor = m.descriptor();
+		}
+
 		List<String> owners = new ArrayList<>();
 		owners.add(owner);
 		if (includeOverrides) {
 			for (String sub : specializationsOf(owner, true)) {
-				if (declaresMethod(sub, method, descriptor)) {
+				TypeInfo subInfo = _types.get(sub);
+				if (subInfo == null) continue;
+				if (spec.paramTypes() == null) {
+					for (MethodInfo m : subInfo.methods()) {
+						if (spec.name().equals(m.name())) { owners.add(sub); break; }
+					}
+				} else if (resolveMethod(subInfo, spec) != null) {
 					owners.add(sub);
 				}
 			}
 		}
 
 		List<CallerRef> raw = new ArrayList<>();
-		boolean exactDescriptor = descriptor != null && !descriptor.isEmpty();
 		for (String o : owners) {
-			if (exactDescriptor) {
-				List<CallerRef> direct = _callers.get(o + "#" + method + "#" + descriptor);
+			if (resolvedDescriptor != null) {
+				List<CallerRef> direct = _callers.get(o + "#" + spec.name() + "#" + resolvedDescriptor);
 				if (direct != null) raw.addAll(direct);
 			} else {
-				String prefix = o + "#" + method + "#";
+				String prefix = o + "#" + spec.name() + "#";
 				for (Map.Entry<String, List<CallerRef>> e : _callers.entrySet()) {
-					if (e.getKey().startsWith(prefix)) raw.addAll(e.getValue());
+					if (!e.getKey().startsWith(prefix)) continue;
+					if (spec.paramTypes() != null && !paramCountOfDescriptor(e.getKey(), prefix.length())
+							.equals(spec.paramTypes().size())) {
+						continue;
+					}
+					raw.addAll(e.getValue());
 				}
 			}
 		}
 		return raw.isEmpty() ? List.of() : aggregateCallers(raw);
 	}
 
-	private boolean declaresMethod(String fqn, String method, String descriptor) {
-		TypeInfo info = _types.get(fqn);
-		if (info == null) return false;
-		boolean exactDescriptor = descriptor != null && !descriptor.isEmpty();
-		for (MethodInfo m : info.methods()) {
-			if (!method.equals(m.name())) continue;
-			if (!exactDescriptor || descriptor.equals(m.descriptor())) return true;
-		}
-		return false;
+	/** Returns the arity of the method descriptor starting at {@code from} in {@code key}. */
+	private static Integer paramCountOfDescriptor(String key, int from) {
+		String desc = key.substring(from);
+		return org.objectweb.asm.Type.getArgumentTypes(desc).length;
 	}
 
 	public List<AccessorRef> fieldReaders(String owner, String field) {
@@ -769,6 +787,93 @@ public class TypeGraph {
 	public record SourceResult(String file, String text, int startLine, int endLine, int totalLines) {
 	}
 
+	/**
+	 * Parsed member reference. {@code paramTypes} is {@code null} when the caller did not specify
+	 * a parameter list (match any overload) or an empty list for explicitly no-arg selection.
+	 */
+	public record MemberSpec(String name, List<String> paramTypes) {
+
+		public static MemberSpec parse(String text) {
+			if (text == null) return null;
+			String trimmed = text.trim();
+			if (trimmed.isEmpty()) return null;
+			int paren = trimmed.indexOf('(');
+			if (paren < 0) return new MemberSpec(trimmed, null);
+			int close = trimmed.lastIndexOf(')');
+			if (close < paren) return new MemberSpec(trimmed.substring(0, paren).trim(), null);
+			String name = trimmed.substring(0, paren).trim();
+			String inside = trimmed.substring(paren + 1, close).trim();
+			if (inside.isEmpty()) return new MemberSpec(name, List.of());
+			return new MemberSpec(name, splitParamTypes(inside));
+		}
+
+		/** Split a parameter list by top-level commas (balances angle brackets and parentheses). */
+		private static List<String> splitParamTypes(String list) {
+			List<String> out = new ArrayList<>();
+			int angle = 0, paren = 0, start = 0;
+			for (int i = 0; i < list.length(); i++) {
+				char c = list.charAt(i);
+				if (c == '<') angle++;
+				else if (c == '>') angle--;
+				else if (c == '(') paren++;
+				else if (c == ')') paren--;
+				else if (c == ',' && angle == 0 && paren == 0) {
+					out.add(stripArgName(list.substring(start, i).trim()));
+					start = i + 1;
+				}
+			}
+			out.add(stripArgName(list.substring(start).trim()));
+			return out;
+		}
+
+		/** Drop a trailing identifier so users can paste full declarations like "ToolBar tb". */
+		static String stripArgName(String token) {
+			int sp = token.lastIndexOf(' ');
+			if (sp < 0) return token;
+			String tail = token.substring(sp + 1);
+			if (tail.isEmpty() || tail.indexOf('.') >= 0 || tail.indexOf('<') >= 0) return token;
+			return token.substring(0, sp).trim();
+		}
+
+		/**
+		 * Does {@code m} match this spec? Parameter types are matched by exact FQN or by simple
+		 * name suffix, array suffixes stripped. Generic type arguments on the spec side are
+		 * ignored (bytecode only has erased types).
+		 */
+		public boolean matches(MethodInfo m) {
+			if (!name.equals(m.name())) return false;
+			if (paramTypes == null) return true;
+			if (paramTypes.size() != m.parameters().size()) return false;
+			for (int i = 0; i < paramTypes.size(); i++) {
+				if (!typeMatches(paramTypes.get(i), m.parameters().get(i).type())) return false;
+			}
+			return true;
+		}
+
+		static boolean typeMatches(String expected, String actual) {
+			String e = erase(expected);
+			String a = erase(actual);
+			while (a.endsWith("[]")) a = a.substring(0, a.length() - 2);
+			while (e.endsWith("[]")) e = e.substring(0, e.length() - 2);
+			if (e.equals(a)) return true;
+			if (a.endsWith("." + e) || a.endsWith("$" + e)) return true;
+			if (e.endsWith("." + a) || e.endsWith("$" + a)) return true;
+			return simpleTail(e).equals(simpleTail(a));
+		}
+
+		private static String simpleTail(String fqn) {
+			int dot = fqn.lastIndexOf('.');
+			String t = dot < 0 ? fqn : fqn.substring(dot + 1);
+			int dollar = t.lastIndexOf('$');
+			return dollar < 0 ? t : t.substring(dollar + 1);
+		}
+
+		private static String erase(String type) {
+			int lt = type.indexOf('<');
+			return lt < 0 ? type : type.substring(0, lt);
+		}
+	}
+
 	public enum SourceMode {
 		/** Auto: 'doc' for class-level queries, 'source' for member queries. */
 		AUTO,
@@ -795,7 +900,7 @@ public class TypeGraph {
 	 *        For member snippets, number of lines of leading context (javadoc, annotations) to
 	 *        include before the method header. Default suggested: 30.
 	 */
-	public SourceResult sourceOf(String fqn, String member, String descriptor, SourceMode mode, int contextLines)
+	public SourceResult sourceOf(String fqn, String memberSpec, SourceMode mode, int contextLines)
 			throws IOException {
 		TypeInfo info = _types.get(fqn);
 		if (info == null) return null;
@@ -810,7 +915,8 @@ public class TypeGraph {
 		if (lines == null) return null;
 
 		SourceMode effective = mode == null ? SourceMode.AUTO : mode;
-		boolean memberQuery = member != null && !member.isEmpty();
+		MemberSpec spec = MemberSpec.parse(memberSpec);
+		boolean memberQuery = spec != null;
 		if (effective == SourceMode.AUTO) {
 			effective = memberQuery ? SourceMode.SOURCE : SourceMode.DOC;
 		}
@@ -819,7 +925,6 @@ public class TypeGraph {
 			if (effective == SourceMode.SOURCE) {
 				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
 			}
-			// DOC: class-level javadoc + class signature up to the opening '{'.
 			String simple = simpleNameOf(fqn);
 			int[] classRange = findClassDeclRange(lines, simple);
 			if (classRange == null) {
@@ -828,15 +933,12 @@ public class TypeGraph {
 			return snippet(entry, lines, classRange[0], classRange[2]);
 		}
 
-		MethodInfo m = findMethod(info, member, descriptor);
-		if (m == null) {
-			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
-		}
+		MethodInfo m = resolveMethod(info, spec);
+		String descriptor = m == null ? null : m.descriptor();
+		List<String> expectedParams = paramTypesFor(m, spec);
 
-		// DOC mode: always find header range via text search — that gives us the terminator
-		// (';' or '{') which is the precise end of the declaration signature.
 		if (effective == SourceMode.DOC) {
-			int[] range = findByTextSearch(lines, member, descriptor);
+			int[] range = findByTextSearch(lines, spec.name(), descriptor, expectedParams);
 			if (range == null) {
 				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
 			}
@@ -845,12 +947,16 @@ public class TypeGraph {
 			return snippet(entry, lines, from, to);
 		}
 
+		if (m == null) {
+			return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
+		}
+
 		// SOURCE mode: prefer bytecode line info, fall back to text search for abstract methods.
 		int startLine = m.startLine();
 		int endLine = m.endLine();
 		int textSearchFrom = -1;
 		if (startLine <= 0) {
-			int[] range = findByTextSearch(lines, member, descriptor);
+			int[] range = findByTextSearch(lines, spec.name(), descriptor, expectedParams);
 			if (range == null) {
 				return new SourceResult(entry, String.join("\n", lines), 1, lines.size(), lines.size());
 			}
@@ -875,6 +981,16 @@ public class TypeGraph {
 			from = prevEnd > 0 ? prevEnd + 1 : 1;
 		}
 		return snippet(entry, lines, from, Math.min(lines.size(), endLine + 1));
+	}
+
+	/** Parameter types to use for text-search disambiguation: prefer the resolved method's. */
+	private static List<String> paramTypesFor(MethodInfo m, MemberSpec spec) {
+		if (m != null) {
+			List<String> out = new ArrayList<>(m.parameters().size());
+			for (Parameter p : m.parameters()) out.add(p.type());
+			return out;
+		}
+		return spec == null ? null : spec.paramTypes();
 	}
 
 	private static SourceResult snippet(String entry, List<String> lines, int from, int to) {
@@ -943,15 +1059,21 @@ public class TypeGraph {
 
 	/**
 	 * Text-search fallback for abstract / interface methods whose bytecode carries no line info.
-	 * Returns {@code [headerFromLine, declarationLine, endLine]} (1-based, inclusive) where
-	 * {@code headerFromLine} is the first line of the attached javadoc / annotation / blank
-	 * block preceding the declaration. Returns {@code null} when the member is not found.
+	 * Matches declaration-looking lines only (skips call sites and statement expressions). When
+	 * {@code expectedParamTypes} is supplied, simple-name comparison on each parameter
+	 * disambiguates overloads; otherwise the descriptor's arity is the only filter.
+	 *
+	 * @return {@code [headerFrom, declarationLine, endLine]} (1-based, inclusive) or
+	 *         {@code null} when the member is not found.
 	 */
-	private static int[] findByTextSearch(List<String> lines, String member, String descriptor) {
-		int expectedParams = -1;
-		if (descriptor != null && !descriptor.isEmpty()) {
+	private static int[] findByTextSearch(List<String> lines, String member, String descriptor,
+			List<String> expectedParamTypes) {
+		int expectedParamCount = -1;
+		if (expectedParamTypes != null) {
+			expectedParamCount = expectedParamTypes.size();
+		} else if (descriptor != null && !descriptor.isEmpty()) {
 			try {
-				expectedParams = org.objectweb.asm.Type.getArgumentTypes(descriptor).length;
+				expectedParamCount = org.objectweb.asm.Type.getArgumentTypes(descriptor).length;
 			} catch (RuntimeException ignore) {
 				// leave as -1
 			}
@@ -960,9 +1082,11 @@ public class TypeGraph {
 		int declLine = -1;
 		for (int i = 0; i < lines.size(); i++) {
 			String line = lines.get(i);
-			if (!declPattern.matcher(line).find()) continue;
-			if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
-			if (expectedParams >= 0 && paramCount(lines, i) != expectedParams) continue;
+			java.util.regex.Matcher matcher = declPattern.matcher(line);
+			if (!matcher.find()) continue;
+			if (!looksLikeDeclaration(line, matcher.start())) continue;
+			if (expectedParamCount >= 0 && paramCount(lines, i) != expectedParamCount) continue;
+			if (expectedParamTypes != null && !paramsMatch(lines, i, expectedParamTypes)) continue;
 			declLine = i + 1;
 			break;
 		}
@@ -977,6 +1101,81 @@ public class TypeGraph {
 			}
 		}
 		return new int[] { walkUpHeader(lines, declLine), declLine, endLine };
+	}
+
+	private static int[] findByTextSearch(List<String> lines, String member, String descriptor) {
+		return findByTextSearch(lines, member, descriptor, null);
+	}
+
+	private static boolean looksLikeDeclaration(String line, int matchStart) {
+		String trimmed = line.trim();
+		if (trimmed.startsWith("//") || trimmed.startsWith("*")) return false;
+		String first = firstWord(trimmed);
+		switch (first) {
+			case "return": case "if": case "while": case "for": case "switch":
+			case "throw": case "case": case "do": case "else": case "yield":
+				return false;
+			default:
+				break;
+		}
+		String before = line.substring(0, matchStart);
+		if (before.indexOf('=') >= 0) return false;
+		if (matchStart > 0) {
+			char c = line.charAt(matchStart - 1);
+			if (c == '.' || c == '_' || Character.isLetterOrDigit(c)) return false;
+		}
+		return true;
+	}
+
+	private static String firstWord(String s) {
+		int end = 0;
+		while (end < s.length() && Character.isLetterOrDigit(s.charAt(end))) end++;
+		return s.substring(0, end);
+	}
+
+	private static boolean paramsMatch(List<String> lines, int startIdx, List<String> expected) {
+		List<String> actual = parseParamList(lines, startIdx);
+		if (actual == null || actual.size() != expected.size()) return false;
+		for (int i = 0; i < expected.size(); i++) {
+			if (!MemberSpec.typeMatches(expected.get(i), actual.get(i))) return false;
+		}
+		return true;
+	}
+
+	private static List<String> parseParamList(List<String> lines, int startIdx) {
+		int depth = 0, angle = 0;
+		boolean seenOpen = false;
+		StringBuilder current = new StringBuilder();
+		List<String> out = new ArrayList<>();
+		for (int i = startIdx; i < lines.size() && i < startIdx + 20; i++) {
+			String line = lines.get(i);
+			for (int k = 0; k < line.length(); k++) {
+				char c = line.charAt(k);
+				if (c == '(') {
+					if (!seenOpen) { seenOpen = true; depth = 1; continue; }
+					depth++;
+				} else if (c == ')') {
+					depth--;
+					if (depth == 0) {
+						String tok = current.toString().trim();
+						if (!tok.isEmpty()) out.add(MemberSpec.stripArgName(tok));
+						return out;
+					}
+				} else if (!seenOpen || depth != 1) {
+					continue;
+				} else if (c == '<') { angle++; current.append(c); }
+				else if (c == '>') { angle--; current.append(c); }
+				else if (c == ',' && angle == 0) {
+					String tok = current.toString().trim();
+					if (!tok.isEmpty()) out.add(MemberSpec.stripArgName(tok));
+					current.setLength(0);
+				} else {
+					current.append(c);
+				}
+			}
+			current.append(' ');
+		}
+		return null;
 	}
 
 	/**
@@ -1017,6 +1216,18 @@ public class TypeGraph {
 				if (m.startLine() > 0 && fallback == null) fallback = m;
 				else if (fallback == null) fallback = m;
 			}
+		}
+		return fallback;
+	}
+
+	/** Resolve a parsed {@link MemberSpec} against the declared methods of {@code info}. */
+	private static MethodInfo resolveMethod(TypeInfo info, MemberSpec spec) {
+		if (info == null || spec == null) return null;
+		MethodInfo fallback = null;
+		for (MethodInfo m : info.methods()) {
+			if (!spec.matches(m)) continue;
+			if (m.startLine() > 0) return m;
+			if (fallback == null) fallback = m;
 		}
 		return fallback;
 	}
