@@ -78,6 +78,14 @@ public class ServeMojo extends AbstractMojo {
 	@Parameter(property = "tl-mcp.path", defaultValue = "/mcp")
 	private String _httpPath;
 
+	/**
+	 * Whether to also index JDK system modules (jrt:/). Adds tens of thousands of types and a
+	 * few seconds of startup time; useful if queries against {@code java.*}/{@code javax.*}
+	 * types are wanted.
+	 */
+	@Parameter(property = "tl-mcp.jdk", defaultValue = "false")
+	private boolean _includeJdk;
+
 	@Override
 	public void execute() throws MojoExecutionException {
 		Set<File> classpath = new LinkedHashSet<>();
@@ -100,13 +108,14 @@ public class ServeMojo extends AbstractMojo {
 
 		TypeGraph graph;
 		try {
-			graph = TypeGraph.load(new ArrayList<>(classpath));
+			graph = TypeGraph.load(new ArrayList<>(classpath), _includeJdk);
 		} catch (Exception ex) {
 			throw new MojoExecutionException("Failed to load type index from classpath.", ex);
 		}
 
 		getLog().info("tl-mcp-server: indexed " + graph.size() + " types from "
-			+ classpath.size() + " classpath entries across " + projects.size() + " reactor module(s) (root: "
+			+ classpath.size() + " classpath entries across " + projects.size() + " reactor module(s)"
+			+ (_includeJdk ? " (+JDK)" : "") + " (root: "
 			+ _project.getId() + (failed > 0 ? ", " + failed + " unresolved" : "") + ")");
 
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();

@@ -5,14 +5,8 @@
  */
 package com.top_logic.tools.mcp;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.Reader;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -25,82 +19,50 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-
-import com.top_logic.common.json.adapt.ReaderR;
-import com.top_logic.common.json.gstream.JsonReader;
-import com.top_logic.xref.model.IndexFile;
-import com.top_logic.xref.model.TypeInfo;
 
 /**
- * Aggregated type index loaded from all <code>TypeIndex.json</code> resources on a classpath.
+ * Aggregated type index built by scanning class-file bytecode across a classpath.
  *
  * <p>
- * Name-based — no class loading is performed. Answers "who specializes X?", "who is annotated
- * with Y?" against the union of indices found in workspace module output dirs and JARs.
+ * Name-based — no classes are loaded. Answers "who specializes X?", "who is annotated with Y?"
+ * against the union of classes found in the given directories and JARs.
  * </p>
  */
 public class TypeGraph {
 
-	/** Resource location of the index file inside every TopLogic module/JAR. */
-	public static final String INDEX_RESOURCE = "META-INF/com.top_logic.basic.reflect.TypeIndex.json";
-
-	private final Map<String, TypeInfo> _types = new HashMap<>();
+	private final Map<String, TypeInfo> _types;
 
 	private final Map<String, List<String>> _specializations = new HashMap<>();
 
 	private final Map<String, List<String>> _annotated = new HashMap<>();
 
-	/**
-	 * Reads indices from the given classpath entries (directories or JAR files) and returns the
-	 * merged {@link TypeGraph}.
-	 */
-	public static TypeGraph load(List<File> classpath) throws IOException {
-		TypeGraph graph = new TypeGraph();
-		for (File entry : classpath) {
-			if (entry.isDirectory()) {
-				File json = new File(entry, INDEX_RESOURCE);
-				if (json.isFile()) {
-					try (Reader r = Files.newBufferedReader(json.toPath(), StandardCharsets.UTF_8)) {
-						graph.merge(r);
-					}
-				}
-			} else if (entry.isFile() && entry.getName().endsWith(".jar")) {
-				try (ZipFile zip = new ZipFile(entry)) {
-					ZipEntry ze = zip.getEntry(INDEX_RESOURCE);
-					if (ze != null) {
-						try (InputStream in = zip.getInputStream(ze);
-								Reader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
-							graph.merge(r);
-						}
-					}
-				}
+	private TypeGraph(Map<String, TypeInfo> types) {
+		_types = types;
+		for (TypeInfo info : types.values()) {
+			for (String supertype : info.supertypes()) {
+				_specializations.computeIfAbsent(supertype, k -> new ArrayList<>()).add(info.name());
+			}
+			for (String annotation : info.annotations()) {
+				_annotated.computeIfAbsent(annotation, k -> new ArrayList<>()).add(info.name());
 			}
 		}
-		return graph;
 	}
 
-	private void merge(Reader r) throws IOException {
-		IndexFile file = IndexFile.readIndexFile(new JsonReader(new ReaderR(r)));
-		for (Map.Entry<String, TypeInfo> entry : file.getTypes().entrySet()) {
-			String fqn = entry.getKey();
-			TypeInfo info = entry.getValue();
+	/**
+	 * Reads class files from the given classpath entries (directories or JAR files) and returns
+	 * the resulting {@link TypeGraph}.
+	 */
+	public static TypeGraph load(List<File> classpath) throws IOException {
+		return load(classpath, false);
+	}
 
-			TypeInfo existing = _types.putIfAbsent(fqn, info);
-			if (existing != null) {
-				// Duplicate across JARs — first wins, indices from different modules for the same
-				// type are expected to agree.
-				continue;
-			}
-
-			for (String supertype : info.getGeneralizations()) {
-				_specializations.computeIfAbsent(supertype, k -> new ArrayList<>()).add(fqn);
-			}
-			for (String annotation : info.getAnnotations().keySet()) {
-				_annotated.computeIfAbsent(annotation, k -> new ArrayList<>()).add(fqn);
-			}
-		}
+	/**
+	 * @param includeJdk
+	 *        When {@code true}, the JDK's own classes (JRT filesystem) are included in the scan.
+	 */
+	public static TypeGraph load(List<File> classpath, boolean includeJdk) throws IOException {
+		Map<String, TypeInfo> types = BytecodeScanner.scan(classpath, includeJdk);
+		return new TypeGraph(types);
 	}
 
 	/** Total number of indexed types. */
@@ -119,8 +81,9 @@ public class TypeGraph {
 	}
 
 	/**
-	 * All known types whose FQN ends with {@code "." + simpleName}, plus an exact FQN match if it
-	 * exists.
+	 * Types whose FQN matches an exact name. When {@code name} contains no '.', it is treated as
+	 * a simple name and matched at '.' or '$' boundaries (so "Component" does not match
+	 * "LayoutComponent").
 	 */
 	public List<String> findByName(String name) {
 		if (name == null || name.isEmpty()) {
@@ -141,7 +104,7 @@ public class TypeGraph {
 		return hits;
 	}
 
-	/** Direct or transitive specializations (subtypes + sub-interfaces) of a type. */
+	/** Direct or transitive specializations of a type. */
 	public List<String> specializationsOf(String fqn, boolean transitive) {
 		if (!transitive) {
 			List<String> direct = _specializations.get(fqn);
@@ -169,14 +132,14 @@ public class TypeGraph {
 		}
 	}
 
-	/** Direct or transitive generalizations (superclasses + super-interfaces) of a type. */
+	/** Direct or transitive generalizations of a type. */
 	public List<String> generalizationsOf(String fqn, boolean transitive) {
 		TypeInfo info = _types.get(fqn);
 		if (info == null) {
 			return List.of();
 		}
 		if (!transitive) {
-			return sorted(info.getGeneralizations());
+			return sorted(info.supertypes());
 		}
 		Set<String> seen = new HashSet<>();
 		collectGeneralizations(fqn, seen);
@@ -192,7 +155,7 @@ public class TypeGraph {
 		if (info == null) {
 			return;
 		}
-		for (String sup : info.getGeneralizations()) {
+		for (String sup : info.supertypes()) {
 			collectGeneralizations(sup, seen);
 		}
 	}
@@ -204,11 +167,6 @@ public class TypeGraph {
 
 	/**
 	 * Composite query spec: all non-null/non-empty fields are AND-combined.
-	 *
-	 * <p>
-	 * Candidate set is seeded from {@code subtypeOf} or {@code supertypeOf} (whichever is set),
-	 * falling back to all types; then filtered by the other criteria.
-	 * </p>
 	 */
 	public record TypeQuery(
 			String name,
@@ -296,7 +254,7 @@ public class TypeGraph {
 					break;
 			}
 			if (hasRequired) {
-				Set<String> annotations = info.getAnnotations().keySet();
+				Set<String> annotations = info.annotations();
 				boolean allPresent = true;
 				for (String ann : required) {
 					if (!annotations.contains(ann)) {
@@ -332,20 +290,19 @@ public class TypeGraph {
 		out.put("public", info.isPublic());
 		out.put("interface", info.isInterface());
 		out.put("abstract", info.isAbstract());
-		out.put("supertypes", new ArrayList<>(info.getGeneralizations()));
-		out.put("annotations", new ArrayList<>(new TreeSet<>(info.getAnnotations().keySet())));
-		if (info.getConfiguration() != null && !info.getConfiguration().isEmpty()) {
-			out.put("configuration", info.getConfiguration());
+		out.put("supertypes", new ArrayList<>(info.supertypes()));
+		out.put("annotations", new ArrayList<>(new TreeSet<>(info.annotations())));
+		if (info.configuration() != null) {
+			out.put("configuration", info.configuration());
 		}
-		if (info.getImplementation() != null && !info.getImplementation().isEmpty()) {
-			out.put("implementation", info.getImplementation());
+		if (info.implementation() != null) {
+			out.put("implementation", info.implementation());
 		}
 		return out;
 	}
 
 	private static List<String> sorted(Collection<String> in) {
-		List<String> out = new ArrayList<>(new TreeSet<>(in));
-		return out;
+		return new ArrayList<>(new TreeSet<>(in));
 	}
 
 }

@@ -21,8 +21,8 @@
 		<maven.version>3.9.6</maven.version>
 		<maven.plugin.tools.version>3.13.1</maven.plugin.tools.version>
 		<mcp.sdk.version>1.1.1</mcp.sdk.version>
-		<tl.version>8.0.0-SNAPSHOT</tl.version>
 		<jetty.version>12.0.14</jetty.version>
+		<asm.version>9.9.1</asm.version>
 	</properties>
 
 	<prerequisites>
@@ -50,9 +50,9 @@
 		</dependency>
 
 		<dependency>
-			<groupId>com.top-logic</groupId>
-			<artifactId>tl-xref</artifactId>
-			<version>${tl.version}</version>
+			<groupId>org.ow2.asm</groupId>
+			<artifactId>asm</artifactId>
+			<version>${asm.version}</version>
 		</dependency>
 
 		<dependency>
