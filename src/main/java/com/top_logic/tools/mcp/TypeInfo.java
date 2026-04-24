@@ -141,6 +141,14 @@ public final class TypeInfo {
 	public record Parameter(String name, String type) {
 	}
 
+	/** Body-level type reference: {@code new T}, cast, {@code instanceof}, {@code catch(T …)}. */
+	public record BodyTypeRef(String type, BodyRefKind kind) {
+	}
+
+	public enum BodyRefKind {
+		INSTANTIATION, CAST, INSTANCEOF, CATCH
+	}
+
 	/** Method-level metadata. */
 	public record MethodInfo(
 			String name,
@@ -152,7 +160,8 @@ public final class TypeInfo {
 			List<AnnotationInfo> annotations,
 			List<CallSite> calls,
 			List<FieldAccess> fieldAccesses,
-			List<String> stringLiterals) {
+			List<String> stringLiterals,
+			List<BodyTypeRef> bodyTypeRefs) {
 
 		public boolean isPublic() { return (access & Opcodes.ACC_PUBLIC) != 0; }
 		public boolean isProtected() { return (access & Opcodes.ACC_PROTECTED) != 0; }

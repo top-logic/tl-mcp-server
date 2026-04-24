@@ -314,6 +314,7 @@ public final class BytecodeScanner {
 			List<TypeInfo.CallSite> calls = _scanBodies ? new ArrayList<>() : List.of();
 			List<TypeInfo.FieldAccess> fieldAccesses = _scanBodies ? new ArrayList<>() : List.of();
 			List<String> literals = _scanBodies ? new ArrayList<>() : List.of();
+			List<TypeInfo.BodyTypeRef> bodyTypeRefs = _scanBodies ? new ArrayList<>() : List.of();
 
 			int finalAccess = access;
 			String finalName = name;
@@ -365,6 +366,27 @@ public final class BytecodeScanner {
 				}
 
 				@Override
+				public void visitTypeInsn(int opcode, String type) {
+					if (!_scanBodies || type == null) return;
+					TypeInfo.BodyRefKind kind;
+					switch (opcode) {
+						case Opcodes.NEW -> kind = TypeInfo.BodyRefKind.INSTANTIATION;
+						case Opcodes.CHECKCAST -> kind = TypeInfo.BodyRefKind.CAST;
+						case Opcodes.INSTANCEOF -> kind = TypeInfo.BodyRefKind.INSTANCEOF;
+						default -> { return; } // ANEWARRAY etc. — not tracked
+					}
+					String fqn = type.startsWith("[") ? type : Type.getObjectType(type).getClassName();
+					bodyTypeRefs.add(new TypeInfo.BodyTypeRef(fqn, kind));
+				}
+
+				@Override
+				public void visitTryCatchBlock(Label start, Label end, Label handler, String type) {
+					if (!_scanBodies || type == null) return; // finally blocks have type==null
+					bodyTypeRefs.add(new TypeInfo.BodyTypeRef(
+						Type.getObjectType(type).getClassName(), TypeInfo.BodyRefKind.CATCH));
+				}
+
+				@Override
 				public void visitLocalVariable(String varName, String varDesc, String varSig, Label start,
 						Label end, int index) {
 					if (varName == null || "this".equals(varName)) return;
@@ -384,7 +406,8 @@ public final class BytecodeScanner {
 					}
 					_target.methods.add(new TypeInfo.MethodInfo(
 						finalName, finalDescriptor, finalAccess,
-						finalReturnType, List.copyOf(params), exList, anns, calls, fieldAccesses, literals));
+						finalReturnType, List.copyOf(params), exList, anns, calls, fieldAccesses, literals,
+						bodyTypeRefs));
 				}
 			};
 		}

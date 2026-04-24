@@ -21,6 +21,9 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 import com.top_logic.tools.mcp.TypeInfo.AnnotationInfo;
+import com.top_logic.tools.mcp.TypeInfo.BodyRefKind;
+import com.top_logic.tools.mcp.TypeInfo.BodyTypeRef;
+import com.top_logic.tools.mcp.TypeInfo.CallSite;
 import com.top_logic.tools.mcp.TypeInfo.FieldAccess;
 import com.top_logic.tools.mcp.TypeInfo.FieldInfo;
 import com.top_logic.tools.mcp.TypeInfo.MethodInfo;
@@ -40,8 +43,8 @@ public class TypeGraph {
 	/** annotation FQN → types carrying it at the class level. */
 	private final Map<String, List<String>> _annotated = new HashMap<>();
 
-	/** referenced FQN → referencing FQNs (class-level + member-signature references). */
-	private final Map<String, Set<String>> _referencedBy = new HashMap<>();
+	/** referenced FQN → structured usage sites (Eclipse "Search Java" style). */
+	private final Map<String, List<Usage>> _referencedBy = new HashMap<>();
 
 	/** moduleId → types in that module. */
 	private final Map<String, List<String>> _byModule = new HashMap<>();
@@ -59,6 +62,42 @@ public class TypeGraph {
 	}
 
 	public record AccessorRef(String ownerType, String method, String descriptor) {
+	}
+
+	/** Kind of usage site recorded in {@link #referencesTo(String, Set, String, int)}. */
+	public enum UsageKind {
+		// Declaration-level
+		SUPERTYPE,
+		TYPE_ANNOTATION,
+		FIELD_TYPE,
+		FIELD_ANNOTATION,
+		METHOD_RETURN,
+		METHOD_PARAMETER,
+		METHOD_EXCEPTION,
+		METHOD_ANNOTATION,
+		// Body-level (require body scan)
+		INSTANTIATION,
+		CAST,
+		INSTANCEOF,
+		CATCH,
+		CALL_DISPATCH,
+		FIELD_READ,
+		FIELD_WRITE
+	}
+
+	/**
+	 * A concrete usage site: the type, method or field (in {@code ownerType} / {@code member})
+	 * where the referenced type appears. For {@link UsageKind#CALL_DISPATCH} and
+	 * {@link UsageKind#FIELD_READ}/{@link UsageKind#FIELD_WRITE}, {@code targetMember} /
+	 * {@code targetDescriptor} identify which member of the referenced type is touched.
+	 */
+	public record Usage(
+			String ownerType,
+			String member,
+			String descriptor,
+			String targetMember,
+			String targetDescriptor,
+			UsageKind kind) {
 	}
 
 	private TypeGraph(Map<String, TypeInfo> types) {
@@ -79,60 +118,80 @@ public class TypeGraph {
 	}
 
 	private void collectReferences(TypeInfo info) {
-		Set<String> refs = new LinkedHashSet<>();
-		if (info.superclass() != null) refs.add(info.superclass());
-		refs.addAll(info.interfaces());
-		for (AnnotationInfo ann : info.annotations()) refs.add(ann.name());
+		String owner = info.name();
+		if (info.superclass() != null)
+			addUsage(info.superclass(), new Usage(owner, null, null, null, null, UsageKind.SUPERTYPE));
+		for (String iface : info.interfaces())
+			addUsage(iface, new Usage(owner, null, null, null, null, UsageKind.SUPERTYPE));
+		for (AnnotationInfo ann : info.annotations())
+			addUsage(ann.name(), new Usage(owner, null, null, null, null, UsageKind.TYPE_ANNOTATION));
+
 		for (MethodInfo m : info.methods()) {
-			addTypeRef(refs, m.returnType());
-			for (Parameter p : m.parameters()) addTypeRef(refs, p.type());
-			refs.addAll(m.exceptions());
-			for (AnnotationInfo ann : m.annotations()) refs.add(ann.name());
+			String mName = m.name(), mDesc = m.descriptor();
+			addTypedUsage(m.returnType(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_RETURN));
+			for (Parameter p : m.parameters())
+				addTypedUsage(p.type(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_PARAMETER));
+			for (String ex : m.exceptions())
+				addUsage(ex, new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_EXCEPTION));
+			for (AnnotationInfo ann : m.annotations())
+				addUsage(ann.name(), new Usage(owner, mName, mDesc, null, null, UsageKind.METHOD_ANNOTATION));
 		}
+
 		for (FieldInfo f : info.fields()) {
-			addTypeRef(refs, f.type());
-			for (AnnotationInfo ann : f.annotations()) refs.add(ann.name());
-		}
-		refs.remove(info.name());
-		for (String target : refs) {
-			_referencedBy.computeIfAbsent(target, k -> new HashSet<>()).add(info.name());
+			addTypedUsage(f.type(), new Usage(owner, f.name(), null, null, null, UsageKind.FIELD_TYPE));
+			for (AnnotationInfo ann : f.annotations())
+				addUsage(ann.name(), new Usage(owner, f.name(), null, null, null, UsageKind.FIELD_ANNOTATION));
 		}
 	}
 
 	private void indexBodies(TypeInfo info) {
+		String owner = info.name();
 		for (MethodInfo m : info.methods()) {
-			Set<String> methodRefs = new LinkedHashSet<>();
-			for (var call : m.calls()) {
-				addTypeRef(methodRefs, call.owner());
+			String mName = m.name(), mDesc = m.descriptor();
+			for (CallSite call : m.calls()) {
+				addTypedUsage(call.owner(), new Usage(owner, mName, mDesc,
+					call.name(), call.descriptor(), UsageKind.CALL_DISPATCH));
 				String key = call.owner() + "#" + call.name() + "#" + call.descriptor();
 				_callers.computeIfAbsent(key, k -> new ArrayList<>())
-					.add(new CallerRef(info.name(), m.name(), m.descriptor()));
+					.add(new CallerRef(owner, mName, mDesc));
 			}
 			for (FieldAccess fa : m.fieldAccesses()) {
-				addTypeRef(methodRefs, fa.owner());
+				UsageKind uk = fa.write() ? UsageKind.FIELD_WRITE : UsageKind.FIELD_READ;
+				addTypedUsage(fa.owner(), new Usage(owner, mName, mDesc,
+					fa.name(), fa.descriptor(), uk));
 				String key = fa.owner() + "#" + fa.name();
-				AccessorRef ref = new AccessorRef(info.name(), m.name(), m.descriptor());
+				AccessorRef ref = new AccessorRef(owner, mName, mDesc);
 				if (fa.write()) {
 					_fieldWriters.computeIfAbsent(key, k -> new ArrayList<>()).add(ref);
 				} else {
 					_fieldReaders.computeIfAbsent(key, k -> new ArrayList<>()).add(ref);
 				}
 			}
-			methodRefs.remove(info.name());
-			for (String target : methodRefs) {
-				_referencedBy.computeIfAbsent(target, k -> new HashSet<>()).add(info.name());
+			for (BodyTypeRef btr : m.bodyTypeRefs()) {
+				UsageKind uk = switch (btr.kind()) {
+					case INSTANTIATION -> UsageKind.INSTANTIATION;
+					case CAST -> UsageKind.CAST;
+					case INSTANCEOF -> UsageKind.INSTANCEOF;
+					case CATCH -> UsageKind.CATCH;
+				};
+				addTypedUsage(btr.type(), new Usage(owner, mName, mDesc, null, null, uk));
 			}
 		}
 	}
 
-	private static void addTypeRef(Set<String> refs, String type) {
-		if (type == null || type.isEmpty()) return;
-		// strip array brackets
-		while (type.endsWith("[]")) {
-			type = type.substring(0, type.length() - 2);
-		}
-		if (isPrimitive(type) || type.equals("void") || type.startsWith("[")) return;
-		refs.add(type);
+	private void addUsage(String target, Usage usage) {
+		if (target == null || target.isEmpty()) return;
+		if (target.equals(usage.ownerType())) return;
+		_referencedBy.computeIfAbsent(target, k -> new ArrayList<>()).add(usage);
+	}
+
+	/** Strips array brackets / primitives before indexing. */
+	private void addTypedUsage(String type, Usage usage) {
+		String t = type;
+		if (t == null || t.isEmpty()) return;
+		while (t.endsWith("[]")) t = t.substring(0, t.length() - 2);
+		if (isPrimitive(t) || t.equals("void") || t.startsWith("[")) return;
+		addUsage(t, usage);
 	}
 
 	private static boolean isPrimitive(String name) {
@@ -228,9 +287,62 @@ public class TypeGraph {
 
 	// ---------- References & calls ----------
 
-	public List<String> referencesTo(String fqn) {
-		Set<String> refs = _referencedBy.get(fqn);
-		return refs == null ? List.of() : sorted(refs);
+	/**
+	 * Structured usage query.
+	 *
+	 * @param fqn
+	 *        Target type whose usages are returned.
+	 * @param kinds
+	 *        When non-null and non-empty, only these usage kinds are included.
+	 * @param ownerPattern
+	 *        Optional Java regex matched ({@link java.util.regex.Matcher#find}) against the
+	 *        declaring class of each usage.
+	 * @param ownerModule
+	 *        When non-null and non-empty, only usages whose owning type lives in the given module
+	 *        id are kept.
+	 * @param limit
+	 *        Cap on returned usages; {@code <= 0} means unlimited. The total count before
+	 *        truncation is returned separately.
+	 */
+	public UsageResult referencesTo(String fqn, Set<UsageKind> kinds, String ownerPattern, String ownerModule,
+			int limit) {
+		List<Usage> all = _referencedBy.get(fqn);
+		if (all == null || all.isEmpty()) {
+			return new UsageResult(List.of(), 0, false, Map.of());
+		}
+		java.util.regex.Pattern pattern = null;
+		if (ownerPattern != null && !ownerPattern.isEmpty()) {
+			try {
+				pattern = java.util.regex.Pattern.compile(ownerPattern);
+			} catch (PatternSyntaxException ex) {
+				throw new IllegalArgumentException("Invalid owner_pattern regex: " + ex.getMessage(), ex);
+			}
+		}
+		boolean filterKinds = kinds != null && !kinds.isEmpty();
+		boolean filterModule = ownerModule != null && !ownerModule.isEmpty();
+
+		List<Usage> filtered = new ArrayList<>();
+		Map<UsageKind, Integer> byKind = new LinkedHashMap<>();
+		for (Usage u : all) {
+			if (filterKinds && !kinds.contains(u.kind())) continue;
+			if (pattern != null && !pattern.matcher(u.ownerType()).find()) continue;
+			if (filterModule) {
+				TypeInfo owner = _types.get(u.ownerType());
+				if (owner == null || !ownerModule.equals(owner.moduleId())) continue;
+			}
+			filtered.add(u);
+			byKind.merge(u.kind(), 1, Integer::sum);
+		}
+		int total = filtered.size();
+		boolean truncated = false;
+		if (limit > 0 && total > limit) {
+			filtered = new ArrayList<>(filtered.subList(0, limit));
+			truncated = true;
+		}
+		return new UsageResult(filtered, total, truncated, byKind);
+	}
+
+	public record UsageResult(List<Usage> usages, int total, boolean truncated, Map<UsageKind, Integer> byKind) {
 	}
 
 	public List<CallerRef> callersOf(String owner, String method, String descriptor) {
