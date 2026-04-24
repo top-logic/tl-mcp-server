@@ -137,6 +137,7 @@ public class ServeMojo extends AbstractMojo {
 		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
+			.instructions(McpTools.INSTRUCTIONS)
 			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
 		McpTools.registerAll(server, jsonMapper, graph);
@@ -155,6 +156,7 @@ public class ServeMojo extends AbstractMojo {
 				.build();
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
+			.instructions(McpTools.INSTRUCTIONS)
 			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
 		McpTools.registerAll(server, jsonMapper, graph);

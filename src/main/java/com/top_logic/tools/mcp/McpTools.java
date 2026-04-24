@@ -35,6 +35,41 @@ import io.modelcontextprotocol.spec.McpSchema.Tool;
  */
 public final class McpTools {
 
+	/**
+	 * Guidance sent to MCP clients in the {@code initialize} response. Tells an LLM when to
+	 * reach for these tools in preference to filesystem {@code grep}/{@code find}.
+	 */
+	public static final String INSTRUCTIONS = """
+		This server indexes the Java type graph of the current Maven reactor: classes, \
+		members, annotations, references, call sites, source files. When working on Java \
+		code, PREFER these tools over grep / find: they resolve overloads, distinguish \
+		declaration sites from call sites, and include dependency JARs that aren't in \
+		the source tree.
+
+		Typical tool recipes:
+		- What does type X do? → describe_type(fqn) for metadata, show_source(fqn) for the \
+		  javadoc-only class header (mode=doc by default for classes), show_source(fqn, mode=source) \
+		  for the full file.
+		- What is method X#m? → show_source(fqn, member) — auto-mode returns the implementation \
+		  including javadoc. Mode=doc returns just the javadoc + signature.
+		- Subtypes / implementors? → query_types(subtype_of, kind=concrete|interface, \
+		  annotated_with).
+		- Who references a type? → references_to(fqn) returns every usage site with a 'kind' \
+		  (supertype, method_parameter, field_type, cast, instanceof, call_dispatch, ...) and \
+		  a per-kind histogram. Narrow with kinds=[...], owner_pattern=..., in_module=... .
+		- Who calls a method? → callers_of(owner, method). Includes subtype overrides by \
+		  default. Method spec is source-level: 'foo', 'foo(String)', 'foo(com.foo.Bar)', \
+		  'foo(String, int)'; generics are ignored.
+		- Who reads or writes a field? → field_accessors(owner, field, mode=read|write|any).
+		- Which JAR or Maven module supplies a class? → module_of(fqn).
+		- All members of a type, filterable? → list_members with filters (name, pattern, \
+		  kind=method|field, type, parameter_type, annotated_with, visibility, static).
+
+		Results may be truncated: respect the 'truncated' flag and either widen filters or \
+		raise 'limit'. Visibility in every output is one of public/protected/package/private; \
+		filters accept an array. The index is built once per `mvn serve` invocation — run \
+		`mvn install` on the target project and restart the server to pick up new code.""";
+
 	private McpTools() {
 		// utility
 	}

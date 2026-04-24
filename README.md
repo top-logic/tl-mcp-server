@@ -94,6 +94,12 @@ For HTTP, start the server once in a terminal
 Startup takes a few seconds while Maven resolves the reactor and ASM scans every
 class. The server blocks afterwards until the client disconnects.
 
+The `initialize` response carries an `instructions` block
+(`McpTools.INSTRUCTIONS`) that tells the LLM when to prefer these tools over
+filesystem `grep` / `find` and lists recipe-level usage notes. MCP clients that
+surface server instructions to the model — Claude Code included — pick this up
+automatically.
+
 ## Tools exposed
 
 | Tool | Purpose |
