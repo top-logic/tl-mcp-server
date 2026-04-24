@@ -137,13 +137,17 @@ public final class TypeInfo {
 		}
 	}
 
+	/** A single method parameter: type is always present, name may be {@code null}. */
+	public record Parameter(String name, String type) {
+	}
+
 	/** Method-level metadata. */
 	public record MethodInfo(
 			String name,
 			String descriptor,
 			int access,
 			String returnType,
-			List<String> parameters,
+			List<Parameter> parameters,
 			List<String> exceptions,
 			List<AnnotationInfo> annotations,
 			List<CallSite> calls,

@@ -24,6 +24,7 @@ import com.top_logic.tools.mcp.TypeInfo.AnnotationInfo;
 import com.top_logic.tools.mcp.TypeInfo.FieldAccess;
 import com.top_logic.tools.mcp.TypeInfo.FieldInfo;
 import com.top_logic.tools.mcp.TypeInfo.MethodInfo;
+import com.top_logic.tools.mcp.TypeInfo.Parameter;
 
 /**
  * Aggregated type index built by scanning class-file bytecode across a classpath. Name-based; no
@@ -84,7 +85,7 @@ public class TypeGraph {
 		for (AnnotationInfo ann : info.annotations()) refs.add(ann.name());
 		for (MethodInfo m : info.methods()) {
 			addTypeRef(refs, m.returnType());
-			for (String p : m.parameters()) addTypeRef(refs, p);
+			for (Parameter p : m.parameters()) addTypeRef(refs, p.type());
 			refs.addAll(m.exceptions());
 			for (AnnotationInfo ann : m.annotations()) refs.add(ann.name());
 		}
@@ -395,7 +396,14 @@ public class TypeGraph {
 			mm.put("name", m.name());
 			mm.put("descriptor", m.descriptor());
 			mm.put("returnType", m.returnType());
-			mm.put("parameters", new ArrayList<>(m.parameters()));
+			List<Map<String, Object>> paramList = new ArrayList<>(m.parameters().size());
+			for (Parameter p : m.parameters()) {
+				Map<String, Object> entry = new LinkedHashMap<>();
+				if (p.name() != null) entry.put("name", p.name());
+				entry.put("type", p.type());
+				paramList.add(entry);
+			}
+			mm.put("parameters", paramList);
 			if (!m.exceptions().isEmpty()) mm.put("exceptions", new ArrayList<>(m.exceptions()));
 			mm.put("public", m.isPublic());
 			if (m.isProtected()) mm.put("protected", true);

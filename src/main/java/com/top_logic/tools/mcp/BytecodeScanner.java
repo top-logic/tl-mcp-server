@@ -28,6 +28,7 @@ import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -284,9 +285,14 @@ public final class BytecodeScanner {
 
 			Type methodType = Type.getMethodType(descriptor);
 			Type[] argTypes = methodType.getArgumentTypes();
-			List<String> params = new ArrayList<>(argTypes.length);
-			for (Type t : argTypes) {
-				params.add(t.getClassName());
+			String[] paramTypes = new String[argTypes.length];
+			String[] paramNames = new String[argTypes.length];
+			int[] paramStartSlots = new int[argTypes.length];
+			int slot = (access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
+			for (int i = 0; i < argTypes.length; i++) {
+				paramTypes[i] = argTypes[i].getClassName();
+				paramStartSlots[i] = slot;
+				slot += argTypes[i].getSize();
 			}
 			List<String> exList;
 			if (exceptions == null || exceptions.length == 0) {
@@ -300,8 +306,8 @@ public final class BytecodeScanner {
 
 			// Constructor-signature heuristic for the config/impl pairing.
 			if ("<init>".equals(name) && _target.configuration == null
-				&& params.size() >= 2 && TypeInfo.INSTANTIATION_CONTEXT.equals(params.get(0))) {
-				_target.configuration = params.get(1);
+				&& paramTypes.length >= 2 && TypeInfo.INSTANTIATION_CONTEXT.equals(paramTypes[0])) {
+				_target.configuration = paramTypes[1];
 			}
 
 			List<TypeInfo.AnnotationInfo> anns = new ArrayList<>(0);
@@ -309,12 +315,21 @@ public final class BytecodeScanner {
 			List<TypeInfo.FieldAccess> fieldAccesses = _scanBodies ? new ArrayList<>() : List.of();
 			List<String> literals = _scanBodies ? new ArrayList<>() : List.of();
 
-			_target.methods.add(new TypeInfo.MethodInfo(
-				name, descriptor, access,
-				methodType.getReturnType().getClassName(),
-				List.copyOf(params), exList, anns, calls, fieldAccesses, literals));
+			int finalAccess = access;
+			String finalName = name;
+			String finalDescriptor = descriptor;
+			String finalReturnType = methodType.getReturnType().getClassName();
 
 			return new MethodVisitor(ASM_API) {
+				int _paramIdx = 0;
+
+				@Override
+				public void visitParameter(String paramName, int paramAccess) {
+					if (_paramIdx < paramNames.length) {
+						paramNames[_paramIdx++] = paramName;
+					}
+				}
+
 				@Override
 				public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
 					if (desc == null) return null;
@@ -347,6 +362,29 @@ public final class BytecodeScanner {
 					if (value instanceof String s) {
 						literals.add(s);
 					}
+				}
+
+				@Override
+				public void visitLocalVariable(String varName, String varDesc, String varSig, Label start,
+						Label end, int index) {
+					if (varName == null || "this".equals(varName)) return;
+					for (int i = 0; i < paramStartSlots.length; i++) {
+						if (paramStartSlots[i] == index && paramNames[i] == null) {
+							paramNames[i] = varName;
+							return;
+						}
+					}
+				}
+
+				@Override
+				public void visitEnd() {
+					List<TypeInfo.Parameter> params = new ArrayList<>(paramTypes.length);
+					for (int i = 0; i < paramTypes.length; i++) {
+						params.add(new TypeInfo.Parameter(paramNames[i], paramTypes[i]));
+					}
+					_target.methods.add(new TypeInfo.MethodInfo(
+						finalName, finalDescriptor, finalAccess,
+						finalReturnType, List.copyOf(params), exList, anns, calls, fieldAccesses, literals));
 				}
 			};
 		}
