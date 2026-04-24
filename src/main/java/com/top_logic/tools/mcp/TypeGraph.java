@@ -832,7 +832,17 @@ public class TypeGraph {
 			if (sp < 0) return token;
 			String tail = token.substring(sp + 1);
 			if (tail.isEmpty() || tail.indexOf('.') >= 0 || tail.indexOf('<') >= 0) return token;
-			return token.substring(0, sp).trim();
+			String head = token.substring(0, sp).trim();
+			// Only strip when the preceding type has balanced generics — otherwise the space sits
+			// between generic arguments (e.g. "Map<String, Integer>") and the tail isn't a name.
+			int angle = 0;
+			for (int i = 0; i < head.length(); i++) {
+				char c = head.charAt(i);
+				if (c == '<') angle++;
+				else if (c == '>') angle--;
+			}
+			if (angle != 0) return token;
+			return head;
 		}
 
 		/**
