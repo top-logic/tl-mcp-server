@@ -19,7 +19,7 @@
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
 		<maven.version>3.9.6</maven.version>
-		<maven.plugin.tools.version>3.13.1</maven.plugin.tools.version>
+		<maven.plugin.tools.version>3.15.1</maven.plugin.tools.version>
 		<mcp.sdk.version>1.1.1</mcp.sdk.version>
 		<jetty.version>12.0.14</jetty.version>
 		<asm.version>9.9.1</asm.version>
@@ -81,6 +81,14 @@
 				<version>${maven.plugin.tools.version}</version>
 				<configuration>
 					<goalPrefix>tl-mcp</goalPrefix>
+					<!--
+						Disable the javadoc-based extractor (qdox) because it chokes on
+						modern Java syntax (pattern-matching instanceof, text blocks).
+						The annotation-based extractor alone is sufficient for @Mojo.
+					-->
+					<extractors>
+						<extractor>java-annotations</extractor>
+					</extractors>
 				</configuration>
 			</plugin>
 		</plugins>
