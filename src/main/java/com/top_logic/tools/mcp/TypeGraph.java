@@ -197,73 +197,128 @@ public class TypeGraph {
 		}
 	}
 
-	/**
-	 * All transitive, public, concrete (non-abstract, non-interface) specializations of a type.
-	 */
-	public List<String> implementorsOf(String fqn) {
-		List<String> subs = specializationsOf(fqn, true);
-		List<String> result = new ArrayList<>();
-		for (String sub : subs) {
-			TypeInfo info = _types.get(sub);
-			if (info != null && info.isPublic() && !info.isAbstract() && !info.isInterface()) {
-				result.add(sub);
-			}
-		}
-		return result;
+	/** Kind filter values for {@link TypeQuery#kind()}. */
+	public enum Kind {
+		ANY, CLASS, INTERFACE, CONCRETE
 	}
 
 	/**
-	 * Search indexed type names.
+	 * Composite query spec: all non-null/non-empty fields are AND-combined.
 	 *
-	 * @param query
-	 *        Pattern to match. If {@code regex} is {@code true}, a Java {@link Pattern} matched
-	 *        against the full FQN; otherwise a case-insensitive substring.
-	 * @param regex
-	 *        Whether {@code query} is a regular expression.
-	 * @param limit
-	 *        Maximum number of results; {@code <= 0} means unlimited.
-	 * @return Sorted list of FQNs that matched, truncated to {@code limit}.
+	 * <p>
+	 * Candidate set is seeded from {@code subtypeOf} or {@code supertypeOf} (whichever is set),
+	 * falling back to all types; then filtered by the other criteria.
+	 * </p>
 	 */
-	public List<String> search(String query, boolean regex, int limit) {
-		if (query == null || query.isEmpty()) {
-			return List.of();
-		}
-		Pattern pattern;
-		String needle;
-		if (regex) {
-			try {
-				pattern = Pattern.compile(query);
-			} catch (PatternSyntaxException ex) {
-				throw new IllegalArgumentException("Invalid regex: " + ex.getMessage(), ex);
-			}
-			needle = null;
+	public record TypeQuery(
+			String name,
+			String pattern,
+			boolean regex,
+			String subtypeOf,
+			String supertypeOf,
+			boolean directOnly,
+			List<String> annotatedWith,
+			Kind kind,
+			boolean publicOnly,
+			int limit) {
+	}
+
+	/** Result of a {@link #query(TypeQuery)} call. */
+	public record QueryResult(List<String> matches, int total, boolean truncated) {
+	}
+
+	/**
+	 * Run a composite query against the index. See {@link TypeQuery} for the filter semantics.
+	 */
+	public QueryResult query(TypeQuery q) {
+		Collection<String> candidates;
+		if (q.subtypeOf() != null && !q.subtypeOf().isEmpty()) {
+			candidates = specializationsOf(q.subtypeOf(), !q.directOnly());
+		} else if (q.supertypeOf() != null && !q.supertypeOf().isEmpty()) {
+			candidates = generalizationsOf(q.supertypeOf(), !q.directOnly());
 		} else {
-			pattern = null;
-			needle = query.toLowerCase();
+			candidates = _types.keySet();
 		}
-		List<String> hits = new ArrayList<>();
-		for (String fqn : _types.keySet()) {
-			boolean match = pattern != null ? pattern.matcher(fqn).find() : fqn.toLowerCase().contains(needle);
-			if (match) {
-				hits.add(fqn);
+
+		Pattern pattern = null;
+		String needle = null;
+		if (q.pattern() != null && !q.pattern().isEmpty()) {
+			if (q.regex()) {
+				try {
+					pattern = Pattern.compile(q.pattern());
+				} catch (PatternSyntaxException ex) {
+					throw new IllegalArgumentException("Invalid regex: " + ex.getMessage(), ex);
+				}
+			} else {
+				needle = q.pattern().toLowerCase();
 			}
 		}
-		Collections.sort(hits);
-		if (limit > 0 && hits.size() > limit) {
-			return hits.subList(0, limit);
+
+		Set<String> nameMatches = null;
+		if (q.name() != null && !q.name().isEmpty()) {
+			nameMatches = new HashSet<>(findByName(q.name()));
 		}
-		return hits;
-	}
 
-	/** Total count of FQNs matching the given search (without limit). */
-	public int searchCount(String query, boolean regex) {
-		return search(query, regex, -1).size();
-	}
+		Kind kind = q.kind() == null ? Kind.ANY : q.kind();
+		List<String> required = q.annotatedWith();
+		boolean hasRequired = required != null && !required.isEmpty();
 
-	/** All types carrying the given annotation (FQN of the annotation class). */
-	public List<String> annotatedWith(String annotationFqn) {
-		List<String> hits = _annotated.get(annotationFqn);
-		return hits == null ? List.of() : sorted(hits);
+		List<String> result = new ArrayList<>();
+		for (String fqn : candidates) {
+			TypeInfo info = _types.get(fqn);
+			if (info == null) {
+				continue;
+			}
+			if (nameMatches != null && !nameMatches.contains(fqn)) {
+				continue;
+			}
+			if (pattern != null && !pattern.matcher(fqn).find()) {
+				continue;
+			}
+			if (needle != null && !fqn.toLowerCase().contains(needle)) {
+				continue;
+			}
+			if (q.publicOnly() && !info.isPublic()) {
+				continue;
+			}
+			switch (kind) {
+				case CLASS:
+					if (info.isInterface()) continue;
+					break;
+				case INTERFACE:
+					if (!info.isInterface()) continue;
+					break;
+				case CONCRETE:
+					if (info.isInterface() || info.isAbstract()) continue;
+					break;
+				case ANY:
+				default:
+					break;
+			}
+			if (hasRequired) {
+				Set<String> annotations = info.getAnnotations().keySet();
+				boolean allPresent = true;
+				for (String ann : required) {
+					if (!annotations.contains(ann)) {
+						allPresent = false;
+						break;
+					}
+				}
+				if (!allPresent) {
+					continue;
+				}
+			}
+			result.add(fqn);
+		}
+
+		Collections.sort(result);
+		int total = result.size();
+		boolean truncated = false;
+		if (q.limit() > 0 && total > q.limit()) {
+			result = new ArrayList<>(result.subList(0, q.limit()));
+			truncated = true;
+		}
+		return new QueryResult(result, total, truncated);
 	}
 
 	/** Summary describing the type as a map for JSON serialization. */

@@ -181,142 +181,106 @@ public class ServeMojo extends AbstractMojo {
 	}
 
 	private static void registerTools(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph) {
-		server.addTool(findType(jsonMapper, graph));
-		server.addTool(searchTypes(jsonMapper, graph));
-		server.addTool(subtypesOf(jsonMapper, graph));
-		server.addTool(supertypesOf(jsonMapper, graph));
-		server.addTool(implementorsOf(jsonMapper, graph));
-		server.addTool(annotatedWith(jsonMapper, graph));
+		server.addTool(queryTypes(jsonMapper, graph));
+		server.addTool(describeType(jsonMapper, graph));
 	}
 
-	private static SyncToolSpecification searchTypes(McpJsonMapper json, TypeGraph graph) {
-		String schema = """
-			{
-			  "type": "object",
-			  "properties": {
-			    "query": {
-			      "type": "string",
-			      "description": "Substring (case-insensitive) matched against each FQN, or a Java regex when 'regex' is true."
-			    },
-			    "regex": {
-			      "type": "boolean",
-			      "description": "Interpret 'query' as a Java regular expression matched (Matcher#find) against the FQN.",
-			      "default": false
-			    },
-			    "limit": {
-			      "type": "integer",
-			      "description": "Maximum number of matches to return. 0 or negative means unlimited. Default 100.",
-			      "default": 100
-			    }
-			  },
-			  "required": ["query"]
-			}
-			""";
-		return SyncToolSpecification.builder()
-			.tool(Tool.builder()
-				.name("search_types")
-				.description("Search indexed type names. Returns FQNs sorted alphabetically. Use this for fuzzy discovery; for exact name lookup prefer find_type.")
-				.inputSchema(json, schema)
-				.build())
-			.callHandler((exchange, request) -> {
-				String query = stringArg(request.arguments(), "query");
-				boolean regex = boolArg(request.arguments(), "regex", false);
-				int limit = intArg(request.arguments(), "limit", 100);
-				List<String> matches;
-				try {
-					matches = graph.search(query, regex, limit);
-				} catch (IllegalArgumentException ex) {
-					return CallToolResult.builder()
-						.isError(true)
-						.content(List.of(new McpSchema.TextContent(ex.getMessage())))
-						.build();
-				}
-				int total = (limit > 0 && matches.size() == limit) ? graph.searchCount(query, regex) : matches.size();
-				Map<String, Object> result = new LinkedHashMap<>();
-				result.put("query", query);
-				result.put("regex", regex);
-				result.put("total", total);
-				result.put("truncated", total > matches.size());
-				result.put("matches", matches);
-				return jsonResult(json, result);
-			})
-			.build();
-	}
-
-	private static SyncToolSpecification findType(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification queryTypes(McpJsonMapper json, TypeGraph graph) {
 		String schema = """
 			{
 			  "type": "object",
 			  "properties": {
 			    "name": {
 			      "type": "string",
-			      "description": "Fully qualified class name, or a bare simple name."
-			    }
-			  },
-			  "required": ["name"]
-			}
-			""";
-		return SyncToolSpecification.builder()
-			.tool(Tool.builder()
-				.name("find_type")
-				.description("Look up type metadata by exact name. If an FQN is given, returns that one type. If a bare simple name (no '.') is given, returns every type whose simple class name is exactly that (matching on '.' or '$' boundaries — a name like 'Component' will not match 'LayoutComponent'). For substring or pattern search across FQNs, use search_types.")
-				.inputSchema(json, schema)
-				.build())
-			.callHandler((exchange, request) -> {
-				String name = stringArg(request.arguments(), "name");
-				Map<String, Object> result = new LinkedHashMap<>();
-				List<String> matches = graph.findByName(name);
-				if (matches.size() == 1) {
-					result.put("type", graph.describe(matches.get(0)));
-				} else {
-					List<Map<String, Object>> descs = new ArrayList<>();
-					for (String fqn : matches) {
-						descs.add(graph.describe(fqn));
-					}
-					result.put("matches", descs);
-				}
-				return jsonResult(json, result);
-			})
-			.build();
-	}
-
-	private static SyncToolSpecification subtypesOf(McpJsonMapper json, TypeGraph graph) {
-		String schema = """
-			{
-			  "type": "object",
-			  "properties": {
-			    "fqn": {
-			      "type": "string",
-			      "description": "Fully qualified name of the base type."
+			      "description": "Exact-match filter: an FQN returns only that type; a bare simple name (no '.') returns every type whose simple class name equals it exactly (anchored at '.' or '$' boundaries)."
 			    },
-			    "transitive": {
+			    "pattern": {
+			      "type": "string",
+			      "description": "Substring filter (case-insensitive) against the full FQN. Combined with 'regex=true' it is interpreted as a Java regex matched via Matcher#find."
+			    },
+			    "regex": {
 			      "type": "boolean",
-			      "description": "If true (default), return specializations recursively.",
+			      "description": "Interpret 'pattern' as a Java regular expression.",
+			      "default": false
+			    },
+			    "subtype_of": {
+			      "type": "string",
+			      "description": "FQN of a base type; restrict results to its (transitive) specializations."
+			    },
+			    "supertype_of": {
+			      "type": "string",
+			      "description": "FQN of a type; restrict results to its (transitive) generalizations (ancestors)."
+			    },
+			    "direct_only": {
+			      "type": "boolean",
+			      "description": "When 'subtype_of' or 'supertype_of' is given, restrict to direct relations (no transitivity).",
+			      "default": false
+			    },
+			    "annotated_with": {
+			      "type": "array",
+			      "items": {"type": "string"},
+			      "description": "Type must carry every listed annotation (by FQN)."
+			    },
+			    "kind": {
+			      "type": "string",
+			      "enum": ["any", "class", "interface", "concrete"],
+			      "description": "'class' = non-interface (may be abstract); 'concrete' = not abstract and not interface.",
+			      "default": "any"
+			    },
+			    "public_only": {
+			      "type": "boolean",
+			      "description": "Exclude non-public types. Default true.",
 			      "default": true
+			    },
+			    "limit": {
+			      "type": "integer",
+			      "description": "Maximum number of matches to return. 0 or negative means unlimited. Default 100.",
+			      "default": 100
 			    }
-			  },
-			  "required": ["fqn"]
+			  }
 			}
 			""";
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
-				.name("subtypes_of")
-				.description("List all types that generalize (extend or implement) the given type.")
+				.name("query_types")
+				.description("Query the indexed Java type graph. All filters are optional and AND-combined: "
+					+ "'name'/'pattern' narrow by name, 'subtype_of'/'supertype_of' walk the hierarchy, "
+					+ "'annotated_with' requires annotations, 'kind' restricts class vs. interface vs. concrete. "
+					+ "Returns a sorted list of FQNs with total count and a 'truncated' flag. "
+					+ "For full metadata of a single type, use describe_type.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler((exchange, request) -> {
-				String fqn = stringArg(request.arguments(), "fqn");
-				boolean transitive = boolArg(request.arguments(), "transitive", true);
-				Map<String, Object> result = new LinkedHashMap<>();
-				result.put("base", fqn);
-				result.put("transitive", transitive);
-				result.put("subtypes", graph.specializationsOf(fqn, transitive));
-				return jsonResult(json, result);
+				Map<String, Object> args = request.arguments();
+				try {
+					TypeGraph.TypeQuery q = new TypeGraph.TypeQuery(
+						nullableStringArg(args, "name"),
+						nullableStringArg(args, "pattern"),
+						boolArg(args, "regex", false),
+						nullableStringArg(args, "subtype_of"),
+						nullableStringArg(args, "supertype_of"),
+						boolArg(args, "direct_only", false),
+						stringListArg(args, "annotated_with"),
+						kindArg(args, "kind"),
+						boolArg(args, "public_only", true),
+						intArg(args, "limit", 100));
+					TypeGraph.QueryResult r = graph.query(q);
+					Map<String, Object> result = new LinkedHashMap<>();
+					result.put("total", r.total());
+					result.put("truncated", r.truncated());
+					result.put("matches", r.matches());
+					return jsonResult(json, result);
+				} catch (IllegalArgumentException ex) {
+					return CallToolResult.builder()
+						.isError(true)
+						.content(List.of(new McpSchema.TextContent(ex.getMessage())))
+						.build();
+				}
 			})
 			.build();
 	}
 
-	private static SyncToolSpecification supertypesOf(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification describeType(McpJsonMapper json, TypeGraph graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -324,11 +288,6 @@ public class ServeMojo extends AbstractMojo {
 			    "fqn": {
 			      "type": "string",
 			      "description": "Fully qualified name of the type."
-			    },
-			    "transitive": {
-			      "type": "boolean",
-			      "description": "If true (default), return ancestors recursively.",
-			      "default": true
 			    }
 			  },
 			  "required": ["fqn"]
@@ -336,75 +295,21 @@ public class ServeMojo extends AbstractMojo {
 			""";
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
-				.name("supertypes_of")
-				.description("List all supertypes (classes and interfaces) of the given type.")
+				.name("describe_type")
+				.description("Full metadata of a single type by FQN: public/interface/abstract flags, direct supertypes, annotations, and (for TL configuration types) paired configuration/implementation FQNs. Returns null-ish if the FQN is unknown.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler((exchange, request) -> {
 				String fqn = stringArg(request.arguments(), "fqn");
-				boolean transitive = boolArg(request.arguments(), "transitive", true);
+				Map<String, Object> desc = graph.describe(fqn);
 				Map<String, Object> result = new LinkedHashMap<>();
-				result.put("type", fqn);
-				result.put("transitive", transitive);
-				result.put("supertypes", graph.generalizationsOf(fqn, transitive));
-				return jsonResult(json, result);
-			})
-			.build();
-	}
-
-	private static SyncToolSpecification implementorsOf(McpJsonMapper json, TypeGraph graph) {
-		String schema = """
-			{
-			  "type": "object",
-			  "properties": {
-			    "fqn": {
-			      "type": "string",
-			      "description": "Fully qualified name of the interface or base class."
-			    }
-			  },
-			  "required": ["fqn"]
-			}
-			""";
-		return SyncToolSpecification.builder()
-			.tool(Tool.builder()
-				.name("implementors_of")
-				.description("List all public, concrete (non-abstract, non-interface) specializations of the given type, transitively.")
-				.inputSchema(json, schema)
-				.build())
-			.callHandler((exchange, request) -> {
-				String fqn = stringArg(request.arguments(), "fqn");
-				Map<String, Object> result = new LinkedHashMap<>();
-				result.put("base", fqn);
-				result.put("implementors", graph.implementorsOf(fqn));
-				return jsonResult(json, result);
-			})
-			.build();
-	}
-
-	private static SyncToolSpecification annotatedWith(McpJsonMapper json, TypeGraph graph) {
-		String schema = """
-			{
-			  "type": "object",
-			  "properties": {
-			    "annotation": {
-			      "type": "string",
-			      "description": "Fully qualified name of the annotation class."
-			    }
-			  },
-			  "required": ["annotation"]
-			}
-			""";
-		return SyncToolSpecification.builder()
-			.tool(Tool.builder()
-				.name("annotated_with")
-				.description("List all types directly annotated with the given annotation (by FQN).")
-				.inputSchema(json, schema)
-				.build())
-			.callHandler((exchange, request) -> {
-				String annotation = stringArg(request.arguments(), "annotation");
-				Map<String, Object> result = new LinkedHashMap<>();
-				result.put("annotation", annotation);
-				result.put("types", graph.annotatedWith(annotation));
+				if (desc == null) {
+					result.put("found", false);
+					result.put("fqn", fqn);
+				} else {
+					result.put("found", true);
+					result.put("type", desc);
+				}
 				return jsonResult(json, result);
 			})
 			.build();
@@ -413,6 +318,48 @@ public class ServeMojo extends AbstractMojo {
 	private static String stringArg(Map<String, Object> args, String key) {
 		Object value = args.get(key);
 		return value == null ? "" : value.toString();
+	}
+
+	private static String nullableStringArg(Map<String, Object> args, String key) {
+		Object value = args.get(key);
+		if (value == null) {
+			return null;
+		}
+		String text = value.toString();
+		return text.isEmpty() ? null : text;
+	}
+
+	private static List<String> stringListArg(Map<String, Object> args, String key) {
+		Object value = args.get(key);
+		if (value == null) {
+			return List.of();
+		}
+		if (value instanceof List<?> list) {
+			List<String> out = new ArrayList<>(list.size());
+			for (Object element : list) {
+				if (element != null) {
+					out.add(element.toString());
+				}
+			}
+			return out;
+		}
+		return List.of(value.toString());
+	}
+
+	private static TypeGraph.Kind kindArg(Map<String, Object> args, String key) {
+		Object value = args.get(key);
+		if (value == null) {
+			return TypeGraph.Kind.ANY;
+		}
+		String text = value.toString().trim().toUpperCase();
+		if (text.isEmpty()) {
+			return TypeGraph.Kind.ANY;
+		}
+		try {
+			return TypeGraph.Kind.valueOf(text);
+		} catch (IllegalArgumentException ex) {
+			throw new IllegalArgumentException("Invalid kind '" + value + "'; expected one of any/class/interface/concrete.");
+		}
 	}
 
 	private static boolean boolArg(Map<String, Object> args, String key, boolean defaultValue) {
