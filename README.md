@@ -175,21 +175,24 @@ Snapshot deploy (continuous, from `*-SNAPSHOT` branches):
 mvn deploy
 ```
 
-Cutting a release:
+Cutting a release uses the `maven-release-plugin` (same configuration as the
+engine: tag format `TL_<version>`, preparation runs `clean install`):
 
 ```bash
-mvn versions:set -DnewVersion=0.1.0 -DgenerateBackupPoms=false
-mvn clean deploy
-git commit -am "Release 0.1.0"
-git tag v0.1.0 && git push --tags
-mvn versions:set -DnewVersion=0.2.0-SNAPSHOT -DgenerateBackupPoms=false
-git commit -am "Bump to 0.2.0-SNAPSHOT"
-git push
+mvn release:prepare     # drops SNAPSHOT, runs clean install, commits, tags,
+                        # bumps to the next SNAPSHOT and commits again
+mvn release:perform     # checks out the tag and runs deploy to Nexus
+```
+
+Clean up release working files if you need to retry before the perform step:
+
+```bash
+mvn release:clean
 ```
 
 After the release lands in Nexus, update `tl-claude-tools` (or any other
 consumer) to reference the released coordinate
-(`com.top-logic:tl-mcp-server:0.1.0`) instead of the snapshot.
+(`com.top-logic:tl-mcp-server:<version>`) instead of the snapshot.
 
 ## Development
 
