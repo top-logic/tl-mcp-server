@@ -19,7 +19,7 @@
 		<maven.version>3.9.16</maven.version>
 		<maven.plugin.tools.version>3.15.1</maven.plugin.tools.version>
 		<mcp.sdk.version>1.1.3</mcp.sdk.version>
-		<jetty.version>12.0.14</jetty.version>
+		<jetty.version>12.0.32</jetty.version>
 		<asm.version>9.10</asm.version>
 	</properties>
 
