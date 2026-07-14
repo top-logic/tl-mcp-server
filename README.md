@@ -228,7 +228,7 @@ Tests use JUnit 5 and run through surefire:
 mvn test
 ```
 
-Two suites:
+Three suites:
 
 - `MemberSpecTest` — pure unit tests for the member-spec parser and overload
   matcher.
@@ -236,3 +236,26 @@ Two suites:
   own `target/classes` + `src/main/java` and assert against known facts (the
   `@Mojo` annotation on `ServeMojo`, `TypeGraph` references `TypeInfo`, source
   retrieval in both modes, overload disambiguation, module resolution).
+- `ResourceBrowserTest` — reconstructs a stacked web resource tree from a
+  synthetic classpath and asserts override ordering, listing, text/binary reads,
+  truncation, and `-web-fragment.war` overlays.
+
+## Pending maintenance
+
+**Remove the `McpResourcePaths` shim once engine ticket #29382 ships.**
+
+`ResourceBrowser` reconstructs the application's web resource stack via
+`com.top_logic.basic.core.workspace.PathInfo`, whose builder API is
+package-private. Until the engine exposes a supported entry point, this is
+reached through `McpResourcePaths` — a shim declared in that engine package but
+compiled into this plugin (a deliberate split-package workaround).
+
+Engine [ticket #29382](http://tl/trac/ticket/29382) adds a public
+`Workspace.getAppPaths(Iterable<Path>, String, String[])` overload
+([PR #1451](http://git.top-logic.com/TopLogic/tl-engine-7/pulls/1451)). When a
+`tl-basic` release containing it is available:
+
+1. Delete `src/main/java/com/top_logic/basic/core/workspace/McpResourcePaths.java`.
+2. In `ResourceBrowser.fromClasspath`, call `Workspace.getAppPaths(classpath, …)`
+   instead of `McpResourcePaths.getAppPaths(classpath, …)`.
+3. Bump `<tl.version>` to that release.
