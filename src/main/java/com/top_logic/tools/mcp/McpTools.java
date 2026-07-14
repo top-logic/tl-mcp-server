@@ -30,9 +30,16 @@ import io.modelcontextprotocol.spec.McpSchema.Tool;
 
 /**
  * Builds the MCP tool specifications and registers them on a {@link McpSyncServer}. Split out of
- * {@code ServeMojo} so the plugin-descriptor generator — which runs qdox over Mojo sources and
- * chokes on modern Java syntax (pattern-matching {@code instanceof}, text blocks in lambdas) —
- * does not have to parse this file.
+ * {@code ServeMojo} to keep the {@code @Mojo} source minimal.
+ *
+ * <p>
+ * The plugin-descriptor generator runs qdox over the whole source tree, so this file must stay
+ * qdox-parseable even though it declares no Mojo. qdox is fragile: its text-block lexer treats a
+ * {@code '} as a character-literal delimiter, so a lone (odd) apostrophe inside a text block runs
+ * past the block end and fails the build with a misleading {@code syntax error}. Keep apostrophes
+ * in text blocks paired — quote identifiers like {@code '*.xml'} rather than writing prose such as
+ * "the file's name".
+ * </p>
  */
 public final class McpTools {
 
