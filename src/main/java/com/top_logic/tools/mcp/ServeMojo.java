@@ -6,8 +6,11 @@
 package com.top_logic.tools.mcp;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.execution.MavenSession;
@@ -72,10 +75,12 @@ public class ServeMojo extends AbstractMojo {
 	public void execute() throws MojoExecutionException {
 		List<BytecodeScanner.Source> classpath = new ArrayList<>();
 		List<File> seen = new ArrayList<>();
+		Set<Path> resourceClasspath = new LinkedHashSet<>();
 		List<MavenProject> projects = _session.getProjects();
 		int failed = 0;
 		for (MavenProject project : projects) {
 			File outputDir = new File(project.getBuild().getOutputDirectory());
+			resourceClasspath.add(outputDir.toPath());
 			if (outputDir.isDirectory() && addOnce(seen, outputDir)) {
 				File sourceDir = new File(project.getBuild().getSourceDirectory());
 				classpath.add(new BytecodeScanner.Source(outputDir, project.getId(),
@@ -84,6 +89,7 @@ public class ServeMojo extends AbstractMojo {
 			try {
 				for (String element : project.getCompileClasspathElements()) {
 					File f = new File(element);
+					resourceClasspath.add(f.toPath());
 					if (addOnce(seen, f)) {
 						classpath.add(new BytecodeScanner.Source(f, null, companionSources(f)));
 					}
@@ -107,12 +113,24 @@ public class ServeMojo extends AbstractMojo {
 			+ (_scanBodies ? " (bodies)" : " (no bodies)")
 			+ " (root: " + _project.getId() + (failed > 0 ? ", " + failed + " unresolved" : "") + ")");
 
+		ResourceBrowser resources = null;
+		try {
+			resources = ResourceBrowser.fromClasspath(resourceClasspath);
+		} catch (Exception ex) {
+			getLog().warn("Resource browsing disabled; cannot build the web resource stack: " + ex.getMessage());
+		}
+		if (resources == null) {
+			getLog().info("tl-mcp-server: no web resources found; resource tools disabled.");
+		} else {
+			getLog().info("tl-mcp-server: web resource stack has " + resources.rootCount() + " root(s).");
+		}
+
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();
 
 		if (_httpPort > 0) {
-			runHttp(graph, jsonMapper);
+			runHttp(graph, resources, jsonMapper);
 		} else {
-			runStdio(graph, jsonMapper);
+			runStdio(graph, resources, jsonMapper);
 		}
 	}
 
@@ -133,14 +151,14 @@ public class ServeMojo extends AbstractMojo {
 		return sources.isFile() ? sources : null;
 	}
 
-	private void runStdio(TypeGraph graph, McpJsonMapper jsonMapper) {
+	private void runStdio(TypeGraph graph, ResourceBrowser resources, McpJsonMapper jsonMapper) {
 		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
 			.instructions(McpTools.INSTRUCTIONS)
 			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
-		McpTools.registerAll(server, jsonMapper, graph);
+		McpTools.registerAll(server, jsonMapper, graph, resources);
 		try {
 			Thread.currentThread().join();
 		} catch (InterruptedException ex) {
@@ -148,7 +166,8 @@ public class ServeMojo extends AbstractMojo {
 		}
 	}
 
-	private void runHttp(TypeGraph graph, McpJsonMapper jsonMapper) throws MojoExecutionException {
+	private void runHttp(TypeGraph graph, ResourceBrowser resources, McpJsonMapper jsonMapper)
+			throws MojoExecutionException {
 		HttpServletStreamableServerTransportProvider transport =
 			HttpServletStreamableServerTransportProvider.builder()
 				.jsonMapper(jsonMapper)
@@ -159,7 +178,7 @@ public class ServeMojo extends AbstractMojo {
 			.instructions(McpTools.INSTRUCTIONS)
 			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
-		McpTools.registerAll(server, jsonMapper, graph);
+		McpTools.registerAll(server, jsonMapper, graph, resources);
 
 		Server jetty = new Server();
 		ServerConnector connector = new ServerConnector(jetty);

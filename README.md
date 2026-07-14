@@ -136,6 +136,15 @@ automatically.
 | `field_accessors` | Methods that read and/or write a field. Requires body scan. `mode`: `read` / `write` / `any`. Filters: `owner_pattern`, `in_module`, `limit`. |
 | `show_source` | Returns the Java source of a type or one of its methods, from the reactor module's `src/main/java` or the companion `-sources.jar`. `mode`: `doc` (javadoc + annotations + signature only — default for classes), `source` (full implementation — default for members), `auto`. `context_lines=0` (default) anchors at the attached javadoc/annotation block; a positive value forces a fixed leading window. |
 | `module_of` | Maven module id (or JAR GAV / filename) that supplied a class. |
+| `list_resources` | Lists the immediate children of a directory in the application's web resource tree — the stacked `src/main/webapp` directories and `-web-fragment.war` overlays, unioned across all modules. Directory names end with `/`. `path` defaults to `/`. |
+| `read_resource` | Returns the effective (topmost overriding) content of a web resource. Text is returned as `text`, binary as base64 `binary`; `max_bytes` caps the response with a `truncated` flag. |
+| `resource_overlays` | Lists every module fragment that contributes a resource, in override order (highest priority first). The first entry is the version `read_resource` returns; later entries are overridden. Answers "which module provides / overrides this file". |
+
+The three resource tools reconstruct the same virtual filesystem the running
+application sees through its `FileManager` (the resource stack and its override
+order come from the reactor classpath via TopLogic's own `Workspace` / `PathInfo`
+/ `MultiFileManager`). They are registered only when the inspected reactor is a
+web application; a non-web project simply omits them.
 
 ### Member spec
 

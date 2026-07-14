@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -65,6 +66,14 @@ public final class McpTools {
 		- All members of a type, filterable? → list_members with filters (name, pattern, \
 		  kind=method|field, type, parameter_type, annotated_with, visibility, static).
 
+		The server also exposes the application's web resource tree - the stacked \
+		src/main/webapp directories and -web-fragment.war overlays - as the running \
+		application's FileManager sees it (present only when the reactor is a web application):
+		- List a resource directory → list_resources(path). Directory names end with '/'.
+		- Read a resource's effective content → read_resource(name). Text inline, binary as base64.
+		- Which module provides/overrides a resource? → resource_overlays(name) returns every \
+		  contributing fragment in override order; the first is the effective version.
+
 		Results may be truncated: respect the 'truncated' flag and either widen filters or \
 		raise 'limit'. Visibility in every output is one of public/protected/package/private; \
 		filters accept an array. The index is built once per `mvn serve` invocation — run \
@@ -74,7 +83,8 @@ public final class McpTools {
 		// utility
 	}
 
-	public static void registerAll(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph) {
+	public static void registerAll(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph,
+			ResourceBrowser resources) {
 		server.addTool(queryTypes(jsonMapper, graph));
 		server.addTool(describeType(jsonMapper, graph));
 		server.addTool(listMembers(jsonMapper, graph));
@@ -83,6 +93,11 @@ public final class McpTools {
 		server.addTool(fieldAccessors(jsonMapper, graph));
 		server.addTool(moduleOf(jsonMapper, graph));
 		server.addTool(showSource(jsonMapper, graph));
+		if (resources != null) {
+			server.addTool(listResources(jsonMapper, resources));
+			server.addTool(readResource(jsonMapper, resources));
+			server.addTool(resourceOverlays(jsonMapper, resources));
+		}
 	}
 
 	// ---------- Tools ----------
@@ -519,6 +534,132 @@ public final class McpTools {
 				result.put("found", module != null);
 				if (module != null) result.put("module", module);
 				return jsonResult(json, result);
+			}))
+			.build();
+	}
+
+	// ---------- Resource tools ----------
+
+	private static SyncToolSpecification listResources(McpJsonMapper json, ResourceBrowser resources) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "path": {"type": "string", "default": "/", "description": "Resource directory to list, e.g. '/' or '/WEB-INF/conf'. A leading slash is added if missing."}
+			  }
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("list_resources")
+				.description("Lists the immediate children of a directory in the application's web resource tree (the stacked src/main/webapp dirs and -web-fragment.war overlays), unioned across all modules. Directory names end with '/'. This is the same virtual filesystem the running application sees through its FileManager.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler(safe((exchange, request) -> {
+				String path = nullableStringArg(request.arguments(), "path");
+				List<String> children = new ArrayList<>(resources.list(path == null ? "/" : path));
+				children.sort(String::compareTo);
+				List<Map<String, Object>> entries = new ArrayList<>(children.size());
+				for (String child : children) {
+					Map<String, Object> entry = new LinkedHashMap<>();
+					entry.put("name", child);
+					entry.put("directory", resources.isDirectory(child));
+					entries.add(entry);
+				}
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("path", path == null ? "/" : path);
+				result.put("count", entries.size());
+				result.put("entries", entries);
+				return jsonResult(json, result);
+			}))
+			.build();
+	}
+
+	private static SyncToolSpecification readResource(McpJsonMapper json, ResourceBrowser resources) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "name": {"type": "string", "description": "Resource name, e.g. '/WEB-INF/web.xml'. A leading slash is added if missing."},
+			    "max_bytes": {"type": "integer", "default": 524288, "description": "Maximum content bytes to return; larger resources are truncated."}
+			  },
+			  "required": ["name"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("read_resource")
+				.description("Returns the effective (topmost overriding) content of a web application resource. Text resources are returned as 'text'; binary resources as base64 'binary'. Use resource_overlays to see which module a resource comes from and what it overrides.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler(safe((exchange, request) -> {
+				Map<String, Object> args = request.arguments();
+				String name = stringArg(args, "name");
+				int maxBytes = intArg(args, "max_bytes", ResourceBrowser.DEFAULT_MAX_BYTES);
+				try {
+					ResourceBrowser.Content content = resources.read(name, maxBytes);
+					Map<String, Object> result = new LinkedHashMap<>();
+					result.put("name", name);
+					if (content == null) {
+						result.put("found", false);
+						return jsonResult(json, result);
+					}
+					result.put("found", true);
+					result.put("contentType", content.contentType());
+					result.put("size", content.size());
+					result.put("bytesReturned", content.bytesReturned());
+					result.put("truncated", content.truncated());
+					if (content.text() != null) {
+						result.put("encoding", "text");
+						result.put("text", content.text());
+					} else {
+						result.put("encoding", "base64");
+						result.put("binary", Base64.getEncoder().encodeToString(content.binary()));
+					}
+					return jsonResult(json, result);
+				} catch (IOException ex) {
+					return errorResult("IO error reading resource: " + ex.getMessage());
+				}
+			}))
+			.build();
+	}
+
+	private static SyncToolSpecification resourceOverlays(McpJsonMapper json, ResourceBrowser resources) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "name": {"type": "string", "description": "Resource name, e.g. '/WEB-INF/layouts/masterFrame.layout.xml'. A leading slash is added if missing."}
+			  },
+			  "required": ["name"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("resource_overlays")
+				.description("Lists every module fragment that contributes the given resource, in override order (highest priority first). The first entry is the effective version read_resource returns; later entries are overridden. Answers 'which module provides/overrides this file'.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler(safe((exchange, request) -> {
+				String name = stringArg(request.arguments(), "name");
+				try {
+					List<ResourceBrowser.Overlay> overlays = resources.overlays(name);
+					List<Map<String, Object>> entries = new ArrayList<>(overlays.size());
+					for (ResourceBrowser.Overlay overlay : overlays) {
+						Map<String, Object> entry = new LinkedHashMap<>();
+						entry.put("uri", overlay.uri());
+						entry.put("directory", overlay.directory());
+						entry.put("size", overlay.size());
+						entries.add(entry);
+					}
+					Map<String, Object> result = new LinkedHashMap<>();
+					result.put("name", name);
+					result.put("count", entries.size());
+					result.put("overlays", entries);
+					return jsonResult(json, result);
+				} catch (IOException ex) {
+					return errorResult("IO error resolving overlays: " + ex.getMessage());
+				}
 			}))
 			.build();
 	}
