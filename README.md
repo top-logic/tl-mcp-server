@@ -44,6 +44,20 @@ Maven resolves the reactor's compile classpath and passes it to the plugin, whic
 indexes every class on it and starts the MCP server. With `-q` Maven keeps stdout
 clean for the JSON-RPC stream.
 
+`show_source` serves source for a dependency only when a `-sources.jar` sits next
+to its binary jar in the local repository. To pull those in first, use the
+`serve.sh` wrapper (from this repo) instead of the bare goal — it runs
+`mvn dependency:sources` before starting the server, then hands off to the same
+`serve` goal:
+
+```bash
+/path/to/tl-mcp-server/serve.sh -f /absolute/path/to/target-project/pom.xml
+```
+
+The pre-fetch is best-effort (artifacts without published sources are skipped) and
+its build output is redirected to stderr so it never corrupts the stdio JSON-RPC
+stream. All arguments are forwarded to Maven, so the options below still apply.
+
 ### Options
 
 | Flag | Default | Effect |
@@ -74,16 +88,19 @@ project's working directory:
 {
   "mcpServers": {
     "tl-mcp": {
-      "command": "mvn",
+      "command": "/absolute/path/to/tl-mcp-server/serve.sh",
       "args": [
-        "-q",
-        "-f", "/absolute/path/to/target-project/pom.xml",
-        "com.top-logic:tl-mcp-server:0.1.0:serve"
+        "-f", "/absolute/path/to/target-project/pom.xml"
       ]
     }
   }
 }
 ```
+
+The `serve.sh` wrapper pulls dependency source jars into the local repository
+before launching, so `show_source` works for external dependencies too. To skip
+that (and invoke the goal directly), point `command` at `mvn` and pass
+`-q com.top-logic:tl-mcp-server:0.1.1-SNAPSHOT:serve` as the trailing args.
 
 For HTTP, start the server once in a terminal
 (`mvn -q ...:serve -Dtl-mcp.port=18765`) and configure the client to reach it:
