@@ -22,10 +22,10 @@ import java.util.Set;
 
 import com.top_logic.basic.FileManager;
 import com.top_logic.basic.MultiFileManager;
+import com.top_logic.basic.core.workspace.McpResourcePaths;
 import com.top_logic.basic.core.workspace.ModuleLayout;
 import com.top_logic.basic.core.workspace.ModuleLayoutConstants;
 import com.top_logic.basic.core.workspace.PathInfo;
-import com.top_logic.basic.core.workspace.Workspace;
 import com.top_logic.basic.io.binary.BinaryData;
 
 /**
@@ -34,10 +34,10 @@ import com.top_logic.basic.io.binary.BinaryData;
  * modules on a classpath.
  *
  * <p>
- * The resource stack and its override order are reconstructed with the same {@link Workspace}
- * /{@link PathInfo} algorithm the application uses at runtime, and served through the same
- * {@link MultiFileManager} API, so a query returns exactly what {@link FileManager} would return
- * inside the running application.
+ * The resource stack and its override order are reconstructed with the same {@link PathInfo}
+ * algorithm the application uses at runtime (driven from the reactor classpath by
+ * {@link McpResourcePaths}), and served through the same {@link MultiFileManager} API, so a query
+ * returns exactly what {@link FileManager} would return inside the running application.
  * </p>
  */
 public final class ResourceBrowser {
@@ -63,7 +63,7 @@ public final class ResourceBrowser {
 	 *         inspected project is not a web application).
 	 */
 	public static ResourceBrowser fromClasspath(Iterable<Path> classpath) throws IOException {
-		PathInfo info = Workspace.getAppPaths(classpath,
+		PathInfo info = McpResourcePaths.getAppPaths(classpath,
 			ModuleLayoutConstants.DEPLOY_FOLDER_NAME, ModuleLayout.DEFAULT_DEPLOY_ASPECTS);
 		List<Path> roots = info.getResourceDirs();
 		if (roots.isEmpty()) {
