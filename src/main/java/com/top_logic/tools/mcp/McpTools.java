@@ -70,6 +70,8 @@ public final class McpTools {
 		src/main/webapp directories and -web-fragment.war overlays - as the running \
 		application's FileManager sees it (present only when the reactor is a web application):
 		- List a resource directory → list_resources(path). Directory names end with '/'.
+		- Find resources by name across the whole tree → find_resources(pattern, under). \
+		  E.g. all '*.layout.template.xml' under '/WEB-INF/layouts'.
 		- Read a resource's effective content → read_resource(name). Text inline, binary as base64.
 		- Which module provides/overrides a resource? → resource_overlays(name) returns every \
 		  contributing fragment in override order; the first is the effective version.
@@ -95,6 +97,7 @@ public final class McpTools {
 		server.addTool(showSource(jsonMapper, graph));
 		if (resources != null) {
 			server.addTool(listResources(jsonMapper, resources));
+			server.addTool(findResources(jsonMapper, resources));
 			server.addTool(readResource(jsonMapper, resources));
 			server.addTool(resourceOverlays(jsonMapper, resources));
 		}
@@ -571,6 +574,45 @@ public final class McpTools {
 				result.put("count", entries.size());
 				result.put("entries", entries);
 				return jsonResult(json, result);
+			}))
+			.build();
+	}
+
+	private static SyncToolSpecification findResources(McpJsonMapper json, ResourceBrowser resources) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "pattern": {"type": "string", "description": "Glob matched against the file name (not the path), e.g. '*.layout.template.xml' or 'web.xml'."},
+			    "under": {"type": "string", "default": "/", "description": "Subtree to search, e.g. '/WEB-INF/layouts'. Defaults to the whole tree. A leading slash is added if missing."},
+			    "limit": {"type": "integer", "default": 1000, "description": "Maximum number of distinct resource names to return."}
+			  },
+			  "required": ["pattern"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("find_resources")
+				.description("Recursively searches the application's web resource tree for files whose name matches a glob, across all stacked modules. Returns distinct resource names (a file overridden in several modules appears once), sorted. Use it to enumerate e.g. all '*.layout.template.xml' under '/WEB-INF/layouts'; feed a hit to resource_overlays to see which module provides it.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler(safe((exchange, request) -> {
+				Map<String, Object> args = request.arguments();
+				String pattern = stringArg(args, "pattern");
+				String under = nullableStringArg(args, "under");
+				int limit = intArg(args, "limit", 1000);
+				try {
+					ResourceBrowser.Matches matches = resources.find(pattern, under == null ? "/" : under, limit);
+					Map<String, Object> result = new LinkedHashMap<>();
+					result.put("pattern", pattern);
+					result.put("under", under == null ? "/" : under);
+					result.put("count", matches.names().size());
+					result.put("truncated", matches.truncated());
+					result.put("resources", matches.names());
+					return jsonResult(json, result);
+				} catch (IOException ex) {
+					return errorResult("IO error searching resources: " + ex.getMessage());
+				}
 			}))
 			.build();
 	}

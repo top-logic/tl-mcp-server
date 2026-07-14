@@ -99,6 +99,42 @@ class ResourceBrowserTest {
 	}
 
 	@Test
+	void testFindRecursivelyWithOverlayDedup(@TempDir Path workspace) throws IOException {
+		Path base = module(workspace, "test-base", null);
+		webResource(base, "WEB-INF/layouts/admin/users.layout.template.xml", "base-users");
+		webResource(base, "WEB-INF/layouts/shared.layout.template.xml", "base-shared");
+		webResource(base, "WEB-INF/layouts/notes.txt", "not a match");
+
+		Path app = module(workspace, "test-app", "test-base");
+		webResource(app, "WEB-INF/layouts/home/dashboard.layout.template.xml", "app-dashboard");
+		// Same resource as in base - must be reported once.
+		webResource(app, "WEB-INF/layouts/shared.layout.template.xml", "app-shared");
+
+		List<Path> classpath = List.of(
+			base.resolve("target/classes"),
+			app.resolve("target/classes"));
+		ResourceBrowser browser = ResourceBrowser.fromClasspath(classpath);
+		assertNotNull(browser);
+
+		ResourceBrowser.Matches matches = browser.find("*.layout.template.xml", "/WEB-INF/layouts", 1000);
+		assertFalse(matches.truncated());
+		assertEquals(List.of(
+			"/WEB-INF/layouts/admin/users.layout.template.xml",
+			"/WEB-INF/layouts/home/dashboard.layout.template.xml",
+			"/WEB-INF/layouts/shared.layout.template.xml"),
+			matches.names());
+
+		// Scoping to a subtree restricts the walk.
+		assertEquals(List.of("/WEB-INF/layouts/home/dashboard.layout.template.xml"),
+			browser.find("*.layout.template.xml", "/WEB-INF/layouts/home", 1000).names());
+
+		// The limit truncates and flags it.
+		ResourceBrowser.Matches limited = browser.find("*.layout.template.xml", "/", 2);
+		assertTrue(limited.truncated());
+		assertEquals(2, limited.names().size());
+	}
+
+	@Test
 	void testWebFragmentWarOverlay(@TempDir Path workspace) throws IOException {
 		// A binary dependency: a jar with a sibling -web-fragment.war carrying its web resources.
 		Path repo = workspace.resolve("repo");

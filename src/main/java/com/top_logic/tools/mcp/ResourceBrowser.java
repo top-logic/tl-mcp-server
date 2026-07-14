@@ -14,11 +14,16 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.PathMatcher;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Stream;
 
 import com.top_logic.basic.FileManager;
 import com.top_logic.basic.MultiFileManager;
@@ -180,6 +185,69 @@ public final class ResourceBrowser {
 		return result;
 	}
 
+	/**
+	 * Recursively searches the resource tree for files whose name matches a glob pattern.
+	 *
+	 * @param pattern
+	 *        A glob matched against each file's name (not its path), e.g.
+	 *        {@code *.layout.template.xml}.
+	 * @param under
+	 *        The subtree to search (e.g. {@code /WEB-INF/layouts}); {@code /} searches everything.
+	 * @param limit
+	 *        The maximum number of distinct resource names to return.
+	 * @return The matching resource names, deduplicated across overlays and sorted. A resource
+	 *         contributed by several modules appears once.
+	 */
+	public Matches find(String pattern, String under, int limit) throws IOException {
+		PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
+		String relative = relative(under);
+
+		Set<String> names = new TreeSet<>();
+		boolean truncated = false;
+		for (Path root : _roots) {
+			Path base = relative.isEmpty() ? root : root.resolve(relative);
+			if (!Files.isDirectory(base)) {
+				continue;
+			}
+			try (Stream<Path> walk = Files.walk(base)) {
+				Iterator<Path> files = walk.iterator();
+				while (files.hasNext()) {
+					Path file = files.next();
+					Path fileName = file.getFileName();
+					if (fileName == null || Files.isDirectory(file)) {
+						continue;
+					}
+					if (matcher.matches(Path.of(fileName.toString()))) {
+						names.add(resourceName(root, file));
+						if (names.size() > limit) {
+							truncated = true;
+							break;
+						}
+					}
+				}
+			}
+			if (truncated) {
+				break;
+			}
+		}
+
+		List<String> result = new ArrayList<>(names);
+		if (result.size() > limit) {
+			result = new ArrayList<>(result.subList(0, limit));
+		}
+		return new Matches(result, truncated);
+	}
+
+	/** The resource name (leading {@code /}, {@code /}-separated) of a file below a root. */
+	private static String resourceName(Path root, Path file) {
+		Path relativePath = root.relativize(file);
+		StringBuilder name = new StringBuilder();
+		for (int n = 0, cnt = relativePath.getNameCount(); n < cnt; n++) {
+			name.append('/').append(relativePath.getName(n));
+		}
+		return name.toString();
+	}
+
 	private static String withLeadingSlash(String path) {
 		if (path == null || path.isEmpty()) {
 			return "/";
@@ -245,6 +313,18 @@ public final class ResourceBrowser {
 	 *        The size in bytes, or {@code -1} for a directory.
 	 */
 	public record Overlay(String uri, boolean directory, long size) {
+		// Value carrier.
+	}
+
+	/**
+	 * The result of a {@link #find(String, String, int)} search.
+	 *
+	 * @param names
+	 *        The matching resource names, deduplicated and sorted.
+	 * @param truncated
+	 *        Whether more matches existed than the requested limit.
+	 */
+	public record Matches(List<String> names, boolean truncated) {
 		// Value carrier.
 	}
 }
