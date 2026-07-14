@@ -192,34 +192,52 @@ filter (omitted = both).
 
 ## Release process
 
+Releases are cut by the Jenkins **`Release_Auto`** job, which runs the standard
+`maven-release-plugin` flow (`release:prepare` + `release:perform`) on a clean
+build agent and deploys to the TopLogic Nexus (`tl-releases`).
+
+**Prerequisite:** push all release commits to the branch first — the job clones
+the remote, so anything committed only locally is *not* released.
+
+Trigger `Release_Auto` with:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `REPO` | `https://git.top-logic.com/TopLogic/tl-mcp-server.git` | This repository. |
+| `BRANCH` | `master` | Branch to release. |
+| `BUILD_MODULE` | `.` | Single-module project. |
+| `VERSION` | *(empty)* | Releases the version the current `-SNAPSHOT` points to (e.g. `0.1.1-SNAPSHOT` → `0.1.1`). Set only to force a version jump. |
+| `NEXT_VERSION` | *(empty)* | Next development version; empty increments the micro (→ `0.1.2-SNAPSHOT`). |
+| `NEXT_MINOR_VERSION` | `false` | `true` increments the minor (micro = 0) for the next development version instead. |
+
+The job tags `v<version>`, runs `clean install`, deploys the release to Nexus,
+and commits the next `-SNAPSHOT` back to the branch. Tests are **skipped** on the
+release build (`-DskipTests=true`), so run them locally before triggering — see
+[Development](#development).
+
+After the release lands in Nexus, update every consumer to the released
+coordinate `com.top-logic:tl-mcp-server:<version>`:
+
+- **`tl-claude-tools`** (the Claude Code plugin that launches this server) — bump
+  the `serve` coordinate in `.mcp.json`, update the version references in its
+  README, and bump the plugin `version` in `.claude-plugin/plugin.json`. Pushing
+  the plugin repo is not enough: refresh the installed plugin via Claude Code's
+  `/plugin` flow so sessions pick up the new version.
+
+### Local release / snapshot deploy
+
 `distributionManagement` is wired to the TopLogic Nexus (same IDs as the engine:
-`tl-releases` / `tl-snapshots`). Credentials live in your `~/.m2/settings.xml`
-under those server IDs.
-
-Snapshot deploy (continuous, from `*-SNAPSHOT` branches):
-
-```bash
-mvn deploy
-```
-
-Cutting a release uses the `maven-release-plugin` (tag format `v<version>`,
-preparation runs `clean install`):
+`tl-releases` / `tl-snapshots`); credentials live in your `~/.m2/settings.xml`
+under those server IDs. To deploy a snapshot or cut a release without Jenkins
+(the underlying `maven-release-plugin` flow; tag format `v<version>`, preparation
+runs `clean install`):
 
 ```bash
-mvn release:prepare     # drops SNAPSHOT, runs clean install, commits, tags,
-                        # bumps to the next SNAPSHOT and commits again
-mvn release:perform     # checks out the tag and runs deploy to Nexus
+mvn deploy              # snapshot deploy from a *-SNAPSHOT
+mvn release:prepare     # drops SNAPSHOT, clean install, commit, tag, bump to next SNAPSHOT
+mvn release:perform     # checks out the tag and deploys to Nexus
+mvn release:clean       # discard release working files to retry before perform
 ```
-
-Clean up release working files if you need to retry before the perform step:
-
-```bash
-mvn release:clean
-```
-
-After the release lands in Nexus, update `tl-claude-tools` (or any other
-consumer) to reference the released coordinate
-(`com.top-logic:tl-mcp-server:<version>`) instead of the snapshot.
 
 ## Development
 
