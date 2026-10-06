@@ -11,6 +11,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.function.Supplier;
 
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.execution.MavenSession;
@@ -100,18 +103,29 @@ public class ServeMojo extends AbstractMojo {
 			}
 		}
 
-		TypeGraph graph;
-		try {
-			graph = TypeGraph.load(classpath, _includeJdk, _scanBodies);
-		} catch (Exception ex) {
-			throw new MojoExecutionException("Failed to build type graph from classpath.", ex);
-		}
-
-		getLog().info("tl-mcp-server: indexed " + graph.size() + " types from "
-			+ classpath.size() + " classpath entries across " + projects.size() + " reactor module(s)"
-			+ (_includeJdk ? " (+JDK)" : "")
-			+ (_scanBodies ? " (bodies)" : " (no bodies)")
-			+ " (root: " + _project.getId() + (failed > 0 ? ", " + failed + " unresolved" : "") + ")");
+		// The index is built in the background: the MCP client allows the server only a fixed
+		// connect window (30 s by default) to answer the initialize request, and indexing a large
+		// reactor takes longer. Tool calls wait for the index when it is not ready yet.
+		int unresolved = failed;
+		CompletableFuture<TypeGraph> index = new CompletableFuture<>();
+		Thread indexer = new Thread(() -> {
+			try {
+				TypeGraph loaded = TypeGraph.load(classpath, _includeJdk, _scanBodies);
+				getLog().info("tl-mcp-server: indexed " + loaded.size() + " types from "
+					+ classpath.size() + " classpath entries across " + projects.size() + " reactor module(s)"
+					+ (_includeJdk ? " (+JDK)" : "")
+					+ (_scanBodies ? " (bodies)" : " (no bodies)")
+					+ " (root: " + _project.getId() + (unresolved > 0 ? ", " + unresolved + " unresolved" : "")
+					+ ")");
+				index.complete(loaded);
+			} catch (Throwable ex) {
+				getLog().error("tl-mcp-server: failed to build type graph from classpath.", ex);
+				index.completeExceptionally(ex);
+			}
+		}, "tl-mcp-index");
+		indexer.setDaemon(true);
+		indexer.start();
+		Supplier<TypeGraph> graph = () -> awaitIndex(index);
 
 		ResourceBrowser resources = null;
 		try {
@@ -134,6 +148,16 @@ public class ServeMojo extends AbstractMojo {
 		}
 	}
 
+	/** Waits for the background index; a failed build is reported to the calling tool. */
+	private static TypeGraph awaitIndex(CompletableFuture<TypeGraph> index) {
+		try {
+			return index.join();
+		} catch (CompletionException ex) {
+			Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+			throw new IllegalStateException("Failed to build type graph from classpath: " + cause, cause);
+		}
+	}
+
 	private static boolean addOnce(List<File> seen, File f) {
 		for (File prev : seen) {
 			if (prev.equals(f)) return false;
@@ -151,8 +175,14 @@ public class ServeMojo extends AbstractMojo {
 		return sources.isFile() ? sources : null;
 	}
 
-	private void runStdio(TypeGraph graph, ResourceBrowser resources, McpJsonMapper jsonMapper) {
-		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
+	/**
+	 * Serves on stdin/stdout until the client closes stdin. The client's end of the connection is
+	 * the server's end too: without this, a server whose client is gone (or whose launcher was
+	 * killed) would run on indefinitely.
+	 */
+	private void runStdio(Supplier<TypeGraph> graph, ResourceBrowser resources, McpJsonMapper jsonMapper) {
+		EofSignalingInputStream in = new EofSignalingInputStream(System.in);
+		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper, in, System.out);
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
 			.instructions(McpTools.INSTRUCTIONS)
@@ -160,13 +190,15 @@ public class ServeMojo extends AbstractMojo {
 			.build();
 		McpTools.registerAll(server, jsonMapper, graph, resources);
 		try {
-			Thread.currentThread().join();
+			in.awaitEof();
 		} catch (InterruptedException ex) {
 			Thread.currentThread().interrupt();
 		}
+		getLog().info("tl-mcp-server: stdin closed, shutting down.");
+		server.closeGracefully();
 	}
 
-	private void runHttp(TypeGraph graph, ResourceBrowser resources, McpJsonMapper jsonMapper)
+	private void runHttp(Supplier<TypeGraph> graph, ResourceBrowser resources, McpJsonMapper jsonMapper)
 			throws MojoExecutionException {
 		HttpServletStreamableServerTransportProvider transport =
 			HttpServletStreamableServerTransportProvider.builder()

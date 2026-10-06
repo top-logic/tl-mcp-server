@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BiFunction;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -92,7 +93,7 @@ public final class McpTools {
 		// utility
 	}
 
-	public static void registerAll(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph,
+	public static void registerAll(McpSyncServer server, McpJsonMapper jsonMapper, Supplier<TypeGraph> graph,
 			ResourceBrowser resources) {
 		server.addTool(queryTypes(jsonMapper, graph));
 		server.addTool(describeType(jsonMapper, graph));
@@ -112,7 +113,7 @@ public final class McpTools {
 
 	// ---------- Tools ----------
 
-	private static SyncToolSpecification queryTypes(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification queryTypes(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -156,7 +157,7 @@ public final class McpTools {
 						kindArg(args, "kind"),
 						visibilitiesArg(args, "visibility", true),
 						intArg(args, "limit", 100));
-					TypeGraph.QueryResult r = graph.query(q);
+					TypeGraph.QueryResult r = graph.get().query(q);
 					Map<String, Object> result = new LinkedHashMap<>();
 					result.put("total", r.total());
 					result.put("truncated", r.truncated());
@@ -169,7 +170,7 @@ public final class McpTools {
 			.build();
 	}
 
-	private static SyncToolSpecification describeType(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification describeType(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -187,7 +188,7 @@ public final class McpTools {
 				.build())
 			.callHandler(safe((exchange, request) -> {
 				String fqn = stringArg(request.arguments(), "fqn");
-				Map<String, Object> desc = graph.describe(fqn);
+				Map<String, Object> desc = graph.get().describe(fqn);
 				Map<String, Object> result = new LinkedHashMap<>();
 				if (desc == null) {
 					result.put("found", false);
@@ -201,7 +202,7 @@ public final class McpTools {
 			.build();
 	}
 
-	private static SyncToolSpecification listMembers(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification listMembers(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -249,7 +250,7 @@ public final class McpTools {
 						visibilitiesArg(args, "visibility", false),
 						nullableBoolArg(args, "static"),
 						intArg(args, "limit", 100));
-					Map<String, Object> desc = graph.describeMembers(fqn, mq);
+					Map<String, Object> desc = graph.get().describeMembers(fqn, mq);
 					Map<String, Object> result = new LinkedHashMap<>();
 					if (desc == null) {
 						result.put("found", false);
@@ -266,7 +267,7 @@ public final class McpTools {
 			.build();
 	}
 
-	private static SyncToolSpecification referencesTo(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification referencesTo(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -304,7 +305,7 @@ public final class McpTools {
 					String ownerPattern = nullableStringArg(args, "owner_pattern");
 					String ownerModule = nullableStringArg(args, "in_module");
 					int limit = intArg(args, "limit", 200);
-					TypeGraph.UsageResult r = graph.referencesTo(fqn, kinds, ownerPattern, ownerModule, limit);
+					TypeGraph.UsageResult r = graph.get().referencesTo(fqn, kinds, ownerPattern, ownerModule, limit);
 					List<Map<String, Object>> out = new ArrayList<>(r.usages().size());
 					for (TypeGraph.Usage u : r.usages()) {
 						Map<String, Object> e = new LinkedHashMap<>();
@@ -335,7 +336,7 @@ public final class McpTools {
 			.build();
 	}
 
-	private static SyncToolSpecification callersOf(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification callersOf(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -365,11 +366,11 @@ public final class McpTools {
 				String ownerModule = nullableStringArg(args, "in_module");
 				int limit = intArg(args, "limit", 200);
 				Pattern pattern = compilePattern(ownerPattern);
-				List<TypeGraph.CallerRef> callers = graph.callersOf(owner, method, includeOverrides);
+				List<TypeGraph.CallerRef> callers = graph.get().callersOf(owner, method, includeOverrides);
 				List<Map<String, Object>> out = new ArrayList<>();
 				for (TypeGraph.CallerRef ref : callers) {
 					if (pattern != null && !pattern.matcher(ref.ownerType()).find()) continue;
-					if (ownerModule != null && !ownerModule.equals(graph.moduleOf(ref.ownerType()))) continue;
+					if (ownerModule != null && !ownerModule.equals(graph.get().moduleOf(ref.ownerType()))) continue;
 					Map<String, Object> e = new LinkedHashMap<>();
 					e.put("type", ref.ownerType());
 					e.put("method", ref.method());
@@ -389,7 +390,7 @@ public final class McpTools {
 			.build();
 	}
 
-	private static SyncToolSpecification fieldAccessors(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification fieldAccessors(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -423,9 +424,9 @@ public final class McpTools {
 				boolean wantWrite = mode == null || "any".equalsIgnoreCase(mode) || "write".equalsIgnoreCase(mode);
 				List<Map<String, Object>> out = new ArrayList<>();
 				if (wantRead) {
-					for (TypeGraph.AccessorRef r : graph.fieldReaders(owner, field)) {
+					for (TypeGraph.AccessorRef r : graph.get().fieldReaders(owner, field)) {
 						if (pattern != null && !pattern.matcher(r.ownerType()).find()) continue;
-						if (ownerModule != null && !ownerModule.equals(graph.moduleOf(r.ownerType()))) continue;
+						if (ownerModule != null && !ownerModule.equals(graph.get().moduleOf(r.ownerType()))) continue;
 						Map<String, Object> e = new LinkedHashMap<>();
 						e.put("type", r.ownerType());
 						e.put("method", r.method());
@@ -436,9 +437,9 @@ public final class McpTools {
 					}
 				}
 				if (wantWrite) {
-					for (TypeGraph.AccessorRef r : graph.fieldWriters(owner, field)) {
+					for (TypeGraph.AccessorRef r : graph.get().fieldWriters(owner, field)) {
 						if (pattern != null && !pattern.matcher(r.ownerType()).find()) continue;
-						if (ownerModule != null && !ownerModule.equals(graph.moduleOf(r.ownerType()))) continue;
+						if (ownerModule != null && !ownerModule.equals(graph.get().moduleOf(r.ownerType()))) continue;
 						Map<String, Object> e = new LinkedHashMap<>();
 						e.put("type", r.ownerType());
 						e.put("method", r.method());
@@ -460,7 +461,7 @@ public final class McpTools {
 			.build();
 	}
 
-	private static SyncToolSpecification showSource(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification showSource(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -486,7 +487,7 @@ public final class McpTools {
 				int ctx = intArg(args, "context_lines", 0);
 				TypeGraph.SourceMode mode = sourceModeArg(args, "mode");
 				try {
-					TypeGraph.SourceResult r = graph.sourceOf(fqn, member, mode, ctx);
+					TypeGraph.SourceResult r = graph.get().sourceOf(fqn, member, mode, ctx);
 					Map<String, Object> result = new LinkedHashMap<>();
 					if (r == null) {
 						result.put("found", false);
@@ -520,7 +521,7 @@ public final class McpTools {
 		}
 	}
 
-	private static SyncToolSpecification moduleOf(McpJsonMapper json, TypeGraph graph) {
+	private static SyncToolSpecification moduleOf(McpJsonMapper json, Supplier<TypeGraph> graph) {
 		String schema = """
 			{
 			  "type": "object",
@@ -538,7 +539,7 @@ public final class McpTools {
 				.build())
 			.callHandler(safe((exchange, request) -> {
 				String fqn = stringArg(request.arguments(), "fqn");
-				String module = graph.moduleOf(fqn);
+				String module = graph.get().moduleOf(fqn);
 				Map<String, Object> result = new LinkedHashMap<>();
 				result.put("fqn", fqn);
 				result.put("found", module != null);
