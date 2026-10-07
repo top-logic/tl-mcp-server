@@ -127,8 +127,8 @@ automatically.
 | `find_resources` | Recursively searches the resource tree for files whose name matches a glob (`pattern`, e.g. `*.layout.template.xml`), optionally scoped to a subtree (`under`, e.g. `/WEB-INF/layouts`). Returns distinct resource names (a file overridden in several modules appears once), sorted, with a `truncated` flag at `limit`. |
 | `read_resource` | Returns the effective (topmost overriding) content of a web resource. Text is returned as `text`, binary as base64 `binary`; `max_bytes` caps the response with a `truncated` flag. |
 | `resource_overlays` | Lists every module fragment that contributes a resource, in override order (highest priority first). The first entry is the version `read_resource` returns; later entries are overridden. Answers "which module provides / overrides this file". |
-| `list_docs` | Lists the developer articles shipped by the modules on the classpath (`META-INF/tl-docs/*.md`): name, description (when to read it), contributing module, size. |
-| `read_doc` | Reads a developer article by `name`. An article longer than `max_chars` (default 40000) is answered with its introduction and outline (headings); `section` (heading text or anchor) returns one section. |
+| `list_docs` | Lists the developer articles shipped by the modules on the classpath (`META-INF/tl-docs/**/*.md`): name, description (when to read it), whether it is a chapter, contributing module, size; plus the `doc:` links that name no existing article (`brokenLinks`). |
+| `read_doc` | Reads a developer article by `name`, which may also be a link target as written in an article (`doc:view-layer/basics#spacing-model`, whose anchor selects the section). An article longer than `max_chars` (default 40000) is answered with its introduction and outline (headings); `section` (heading text or anchor) returns one section. |
 
 The three resource tools reconstruct the same virtual filesystem the running
 application sees through its `FileManager` (the resource stack and its override
@@ -138,24 +138,33 @@ web application; a non-web project simply omits them.
 
 ### Developer articles
 
-A module ships developer articles as Markdown files `META-INF/tl-docs/<name>.md`
-in its jar (in the engine: `src/main/java/META-INF/tl-docs/`). The file name is
-the article name; a front matter block gives its description, worded as when to
-read it:
+A module ships developer articles as Markdown files below `META-INF/tl-docs/`
+in its jar (in the engine: `src/main/java/META-INF/tl-docs/`). The path without
+`.md` is the article name (`view-layer/tables`). A folder is a chapter; its
+`index.md` describes the chapter and is listed under the folder name, and the
+folders of the same path in several modules form one chapter. A front matter
+block gives the description, worded as when to read it, and an optional `order`
+placing the entry in its chapter:
 
 ```markdown
 ---
-description: Read before writing or changing a .view.xml of the React view layer ...
+description: Read before configuring a <table> in a .view.xml ...
+order: 60
 ---
 
-# FAQ: React view layer
+# Tables
 ```
 
+A link to another article names it with the `doc:` scheme, relative to the
+`tl-docs` root: `[spacing](doc:view-layer/basics#spacing-model)`. Such a link
+works across modules, and `read_doc` takes it as it stands.
+
 The articles are collected from the `src/main/java` directories of the reactor
-modules first, then from the compile classpath (the first article of a name
-wins), so a workspace sees exactly the articles of the modules and versions it
+modules first, then from the compile classpath without the build output of the
+reactor modules, which may still hold an article whose source was removed (the
+first article of a name wins), so a workspace sees exactly the articles of the modules and versions it
 builds against. At startup the server writes their index (one line per article
-with name and description) to `target/tl-docs-index.md` of the project it runs
+with name and description, the articles of a chapter indented below it) to `target/tl-docs-index.md` of the project it runs
 in; the `tl-claude-tools` plugin prints this file at the start of a Claude Code
 session, so the agent learns which articles exist without starting a tool call.
 
