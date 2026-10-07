@@ -127,12 +127,37 @@ automatically.
 | `find_resources` | Recursively searches the resource tree for files whose name matches a glob (`pattern`, e.g. `*.layout.template.xml`), optionally scoped to a subtree (`under`, e.g. `/WEB-INF/layouts`). Returns distinct resource names (a file overridden in several modules appears once), sorted, with a `truncated` flag at `limit`. |
 | `read_resource` | Returns the effective (topmost overriding) content of a web resource. Text is returned as `text`, binary as base64 `binary`; `max_bytes` caps the response with a `truncated` flag. |
 | `resource_overlays` | Lists every module fragment that contributes a resource, in override order (highest priority first). The first entry is the version `read_resource` returns; later entries are overridden. Answers "which module provides / overrides this file". |
+| `list_docs` | Lists the developer articles shipped by the modules on the classpath (`META-INF/tl-docs/*.md`): name, description (when to read it), contributing module, size. |
+| `read_doc` | Reads a developer article by `name`. An article longer than `max_chars` (default 40000) is answered with its introduction and outline (headings); `section` (heading text or anchor) returns one section. |
 
 The three resource tools reconstruct the same virtual filesystem the running
 application sees through its `FileManager` (the resource stack and its override
 order come from the reactor classpath via TopLogic's own `Workspace` / `PathInfo`
 / `MultiFileManager`). They are registered only when the inspected reactor is a
 web application; a non-web project simply omits them.
+
+### Developer articles
+
+A module ships developer articles as Markdown files `META-INF/tl-docs/<name>.md`
+in its jar (in the engine: `src/main/java/META-INF/tl-docs/`). The file name is
+the article name; a front matter block gives its description, worded as when to
+read it:
+
+```markdown
+---
+description: Read before writing or changing a .view.xml of the React view layer ...
+---
+
+# FAQ: React view layer
+```
+
+The articles are collected from the `src/main/java` directories of the reactor
+modules first, then from the compile classpath (the first article of a name
+wins), so a workspace sees exactly the articles of the modules and versions it
+builds against. At startup the server writes their index (one line per article
+with name and description) to `target/tl-docs-index.md` of the project it runs
+in; the `tl-claude-tools` plugin prints this file at the start of a Claude Code
+session, so the agent learns which articles exist without starting a tool call.
 
 ### Member spec
 
@@ -234,7 +259,7 @@ Tests use JUnit 5 and run through surefire:
 mvn test
 ```
 
-Three suites:
+Four suites:
 
 - `MemberSpecTest` — pure unit tests for the member-spec parser and overload
   matcher.
@@ -245,6 +270,8 @@ Three suites:
 - `ResourceBrowserTest` — reconstructs a stacked web resource tree from a
   synthetic classpath and asserts override ordering, listing, text/binary reads,
   truncation, and `-web-fragment.war` overlays.
+- `DocCatalogTest` — collects developer articles from a source directory and a
+  jar and asserts precedence, front matter, outline, sections and the index.
 
 ## Pending maintenance
 

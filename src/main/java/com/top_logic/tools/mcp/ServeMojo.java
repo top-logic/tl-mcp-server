@@ -6,6 +6,7 @@
 package com.top_logic.tools.mcp;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -47,6 +48,13 @@ import io.modelcontextprotocol.spec.McpSchema;
 	requiresProject = true)
 public class ServeMojo extends AbstractMojo {
 
+	/**
+	 * File in the build directory of the project the server runs in, to which the index of the
+	 * developer articles ({@link DocCatalog#index()}) is written at startup. A client reads it
+	 * without starting the server, e.g. to announce the articles at the start of an agent session.
+	 */
+	public static final String DOC_INDEX_FILE = "tl-docs-index.md";
+
 	@Parameter(defaultValue = "${project}", readonly = true, required = true)
 	private MavenProject _project;
 
@@ -76,8 +84,13 @@ public class ServeMojo extends AbstractMojo {
 		List<BytecodeScanner.Source> classpath = new ArrayList<>();
 		List<File> seen = new ArrayList<>();
 		Set<Path> resourceClasspath = new LinkedHashSet<>();
+		Set<Path> docClasspath = new LinkedHashSet<>();
 		List<MavenProject> projects = _session.getProjects();
 		int failed = 0;
+		for (MavenProject project : projects) {
+			// A reactor module's own articles are read from its sources, which are newer than its build output.
+			docClasspath.add(Path.of(project.getBuild().getSourceDirectory()));
+		}
 		for (MavenProject project : projects) {
 			File outputDir = new File(project.getBuild().getOutputDirectory());
 			resourceClasspath.add(outputDir.toPath());
@@ -99,6 +112,16 @@ public class ServeMojo extends AbstractMojo {
 				getLog().warn("Skipping classpath of " + project.getId() + ": " + ex.getMessage());
 			}
 		}
+		docClasspath.addAll(resourceClasspath);
+
+		DocCatalog docs = DocCatalog.fromClasspath(docClasspath);
+		Path indexFile = Path.of(_project.getBuild().getDirectory(), DOC_INDEX_FILE);
+		try {
+			docs.writeIndex(indexFile);
+		} catch (IOException ex) {
+			getLog().warn("Cannot write the article index " + indexFile + ": " + ex.getMessage());
+		}
+		getLog().info("tl-mcp-server: " + docs.docs().size() + " developer article(s), index in " + indexFile + ".");
 
 		TypeGraph graph;
 		try {
@@ -128,9 +151,9 @@ public class ServeMojo extends AbstractMojo {
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();
 
 		if (_httpPort > 0) {
-			runHttp(graph, resources, jsonMapper);
+			runHttp(graph, resources, docs, jsonMapper);
 		} else {
-			runStdio(graph, resources, jsonMapper);
+			runStdio(graph, resources, docs, jsonMapper);
 		}
 	}
 
@@ -151,14 +174,14 @@ public class ServeMojo extends AbstractMojo {
 		return sources.isFile() ? sources : null;
 	}
 
-	private void runStdio(TypeGraph graph, ResourceBrowser resources, McpJsonMapper jsonMapper) {
+	private void runStdio(TypeGraph graph, ResourceBrowser resources, DocCatalog docs, McpJsonMapper jsonMapper) {
 		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
 			.instructions(McpTools.INSTRUCTIONS)
 			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
-		McpTools.registerAll(server, jsonMapper, graph, resources);
+		McpTools.registerAll(server, jsonMapper, graph, resources, docs);
 		try {
 			Thread.currentThread().join();
 		} catch (InterruptedException ex) {
@@ -166,7 +189,7 @@ public class ServeMojo extends AbstractMojo {
 		}
 	}
 
-	private void runHttp(TypeGraph graph, ResourceBrowser resources, McpJsonMapper jsonMapper)
+	private void runHttp(TypeGraph graph, ResourceBrowser resources, DocCatalog docs, McpJsonMapper jsonMapper)
 			throws MojoExecutionException {
 		HttpServletStreamableServerTransportProvider transport =
 			HttpServletStreamableServerTransportProvider.builder()
@@ -178,7 +201,7 @@ public class ServeMojo extends AbstractMojo {
 			.instructions(McpTools.INSTRUCTIONS)
 			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
 			.build();
-		McpTools.registerAll(server, jsonMapper, graph, resources);
+		McpTools.registerAll(server, jsonMapper, graph, resources, docs);
 
 		Server jetty = new Server();
 		ServerConnector connector = new ServerConnector(jetty);

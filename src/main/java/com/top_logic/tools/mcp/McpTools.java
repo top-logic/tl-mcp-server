@@ -54,6 +54,10 @@ public final class McpTools {
 		declaration sites from call sites, and include dependency JARs that aren't in \
 		the source tree.
 
+		Developer articles: the modules on the classpath ship Markdown articles on how to \
+		use them (META-INF/tl-docs/*.md). Before working with an engine feature, check \
+		list_docs for an article on it and read it with read_doc(name[, section]).
+
 		Typical tool recipes:
 		- What does type X do? → describe_type(fqn) for metadata, show_source(fqn) for the \
 		  javadoc-only class header (mode=doc by default for classes), show_source(fqn, mode=source) \
@@ -88,12 +92,17 @@ public final class McpTools {
 		filters accept an array. The index is built once per `mvn serve` invocation — run \
 		`mvn install` on the target project and restart the server to pick up new code.""";
 
+	/** Size above which read_doc answers with an outline instead of the full article. */
+	private static final int DEFAULT_DOC_MAX_CHARS = 40_000;
+
 	private McpTools() {
 		// utility
 	}
 
 	public static void registerAll(McpSyncServer server, McpJsonMapper jsonMapper, TypeGraph graph,
-			ResourceBrowser resources) {
+			ResourceBrowser resources, DocCatalog docs) {
+		server.addTool(listDocs(jsonMapper, docs));
+		server.addTool(readDoc(jsonMapper, docs));
 		server.addTool(queryTypes(jsonMapper, graph));
 		server.addTool(describeType(jsonMapper, graph));
 		server.addTool(listMembers(jsonMapper, graph));
@@ -711,6 +720,100 @@ public final class McpTools {
 				}
 			}))
 			.build();
+	}
+
+	private static SyncToolSpecification listDocs(McpJsonMapper json, DocCatalog docs) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {}
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("list_docs")
+				.description("Lists the developer articles shipped by the modules on the classpath (META-INF/tl-docs/*.md): name, a description saying when to read it, the contributing module, and its size. Read one with read_doc.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler(safe((exchange, request) -> {
+				List<Map<String, Object>> entries = new ArrayList<>();
+				for (DocCatalog.Doc doc : docs.docs()) {
+					Map<String, Object> entry = new LinkedHashMap<>();
+					entry.put("name", doc.name());
+					entry.put("description", doc.description());
+					entry.put("origin", doc.origin());
+					entry.put("chars", doc.text().length());
+					entries.add(entry);
+				}
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("count", entries.size());
+				result.put("docs", entries);
+				return jsonResult(json, result);
+			}))
+			.build();
+	}
+
+	private static SyncToolSpecification readDoc(McpJsonMapper json, DocCatalog docs) {
+		String schema = """
+			{
+			  "type": "object",
+			  "properties": {
+			    "name": {"type": "string", "description": "Article name as listed by list_docs, e.g. 'react-view-layer'."},
+			    "section": {"type": "string", "description": "Heading text or anchor of the section to return (case-insensitive; exact match first, then substring). The section ends at the next heading of the same or a higher level."},
+			    "max_chars": {"type": "integer", "default": 40000, "description": "Without 'section': an article longer than this is answered with its introduction and outline instead of the full text."}
+			  },
+			  "required": ["name"]
+			}
+			""";
+		return SyncToolSpecification.builder()
+			.tool(Tool.builder()
+				.name("read_doc")
+				.description("Reads a developer article (see list_docs). Returns the full Markdown text, or for a long article its introduction and outline (headings) - then read the relevant parts with 'section'.")
+				.inputSchema(json, schema)
+				.build())
+			.callHandler(safe((exchange, request) -> {
+				Map<String, Object> args = request.arguments();
+				String name = stringArg(args, "name");
+				String section = nullableStringArg(args, "section");
+				int maxChars = intArg(args, "max_chars", DEFAULT_DOC_MAX_CHARS);
+				DocCatalog.Doc doc = docs.get(name);
+				Map<String, Object> result = new LinkedHashMap<>();
+				result.put("name", name);
+				if (doc == null) {
+					result.put("found", false);
+					result.put("available", docs.docs().stream().map(DocCatalog.Doc::name).toList());
+					return jsonResult(json, result);
+				}
+				result.put("found", true);
+				result.put("origin", doc.origin());
+				if (section != null) {
+					String text = DocCatalog.section(doc, section);
+					if (text == null) {
+						result.put("sectionFound", false);
+						result.put("outline", outline(doc));
+					} else {
+						result.put("sectionFound", true);
+						result.put("text", text);
+					}
+				} else if (doc.text().length() <= maxChars) {
+					result.put("text", doc.text());
+				} else {
+					result.put("truncated", true);
+					result.put("chars", doc.text().length());
+					result.put("intro", DocCatalog.intro(doc));
+					result.put("outline", outline(doc));
+				}
+				return jsonResult(json, result);
+			}))
+			.build();
+	}
+
+	private static List<String> outline(DocCatalog.Doc doc) {
+		List<String> result = new ArrayList<>();
+		for (DocCatalog.Heading heading : DocCatalog.outline(doc)) {
+			result.add("#".repeat(heading.level()) + " " + heading.title());
+		}
+		return result;
 	}
 
 	// ---------- Argument helpers ----------
