@@ -55,8 +55,9 @@ public final class McpTools {
 		the source tree.
 
 		Developer articles: the modules on the classpath ship Markdown articles on how to \
-		use them (META-INF/tl-docs/*.md). Before working with an engine feature, check \
-		list_docs for an article on it and read it with read_doc(name[, section]).
+		use them (META-INF/tl-docs/**/*.md, folders are chapters). Before working with an engine \
+		feature, check list_docs for an article on it and read it with read_doc(name[, section]); \
+		a link doc:<name>#<section> in an article can be passed to read_doc as it stands.
 
 		Typical tool recipes:
 		- What does type X do? → describe_type(fqn) for metadata, show_source(fqn) for the \
@@ -732,7 +733,7 @@ public final class McpTools {
 		return SyncToolSpecification.builder()
 			.tool(Tool.builder()
 				.name("list_docs")
-				.description("Lists the developer articles shipped by the modules on the classpath (META-INF/tl-docs/*.md): name, a description saying when to read it, the contributing module, and its size. Read one with read_doc.")
+				.description("Lists the developer articles shipped by the modules on the classpath (META-INF/tl-docs/**/*.md): name (the path, folders are chapters whose index.md is listed under the folder name), a description saying when to read it, whether it is a chapter, the contributing module, and its size. Also lists links to articles that do not exist (brokenLinks). Read one with read_doc.")
 				.inputSchema(json, schema)
 				.build())
 			.callHandler(safe((exchange, request) -> {
@@ -741,6 +742,7 @@ public final class McpTools {
 					Map<String, Object> entry = new LinkedHashMap<>();
 					entry.put("name", doc.name());
 					entry.put("description", doc.description());
+					entry.put("chapter", doc.chapter());
 					entry.put("origin", doc.origin());
 					entry.put("chars", doc.text().length());
 					entries.add(entry);
@@ -748,6 +750,7 @@ public final class McpTools {
 				Map<String, Object> result = new LinkedHashMap<>();
 				result.put("count", entries.size());
 				result.put("docs", entries);
+				result.put("brokenLinks", docs.brokenLinks());
 				return jsonResult(json, result);
 			}))
 			.build();
@@ -758,7 +761,7 @@ public final class McpTools {
 			{
 			  "type": "object",
 			  "properties": {
-			    "name": {"type": "string", "description": "Article name as listed by list_docs, e.g. 'react-view-layer'."},
+			    "name": {"type": "string", "description": "Article name as listed by list_docs, e.g. 'view-layer/tables', or a link target as it appears in an article, e.g. 'doc:view-layer/basics#spacing-model' (its anchor selects the section)."},
 			    "section": {"type": "string", "description": "Heading text or anchor of the section to return (case-insensitive; exact match first, then substring). The section ends at the next heading of the same or a higher level."},
 			    "max_chars": {"type": "integer", "default": 40000, "description": "Without 'section': an article longer than this is answered with its introduction and outline instead of the full text."}
 			  },
@@ -775,6 +778,9 @@ public final class McpTools {
 				Map<String, Object> args = request.arguments();
 				String name = stringArg(args, "name");
 				String section = nullableStringArg(args, "section");
+				if (section == null) {
+					section = DocCatalog.linkSection(name);
+				}
 				int maxChars = intArg(args, "max_chars", DEFAULT_DOC_MAX_CHARS);
 				DocCatalog.Doc doc = docs.get(name);
 				Map<String, Object> result = new LinkedHashMap<>();

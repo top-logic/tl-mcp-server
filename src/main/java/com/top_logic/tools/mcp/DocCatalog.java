@@ -17,6 +17,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -25,20 +28,25 @@ import java.util.zip.ZipFile;
  * Developer articles shipped with the modules of a classpath.
  *
  * <p>
- * An article is a Markdown file {@value #DOCS_DIR}{@code /<name>.md} on the classpath: in a jar, in a
- * class output directory, or in the {@code src/main/java} directory of a reactor module. It starts
- * with a front matter block whose {@code description} says when to read the article:
+ * An article is a Markdown file below {@value #DOCS_DIR} on the classpath: in a jar, in a class
+ * output directory, or in the {@code src/main/java} directory of a reactor module. Its path relative
+ * to that folder without {@code .md} is the article name, e.g. {@code view-layer/tables}. A folder
+ * is a chapter; the {@value #CHAPTER_FILE} in it describes the chapter and is listed under the name
+ * of the folder. A file starts with a front matter block whose {@code description} says when to
+ * read the article and whose optional {@code order} places it among the entries of its chapter:
  * </p>
  *
  * <pre>
  * ---
  * description: Read before writing or changing a .view.xml ...
+ * order: 10
  * ---
  * </pre>
  *
  * <p>
- * The file name without {@code .md} is the article name. When several classpath entries contribute
- * an article of the same name, the first one wins.
+ * A link to another article names it with the {@value #LINK_SCHEME} scheme:
+ * {@code [spacing](doc:view-layer/basics#spacing-model)}. When several classpath entries contribute
+ * a file of the same path, the first one wins.
  * </p>
  */
 public final class DocCatalog {
@@ -55,19 +63,35 @@ public final class DocCatalog {
 	/** Front matter key of the article description. */
 	private static final String DESCRIPTION_KEY = "description";
 
+	/** Front matter key of the position of an entry in its chapter. */
+	private static final String ORDER_KEY = "order";
+
+	/** File of a chapter folder describing the chapter. */
+	public static final String CHAPTER_FILE = "index.md";
+
+	/** Scheme of a link to an article, followed by the article name. */
+	public static final String LINK_SCHEME = "doc:";
+
+	/** A link to an article in the Markdown source: target name and optional anchor. */
+	private static final Pattern DOC_LINK = Pattern.compile("\\]\\(" + Pattern.quote(LINK_SCHEME) + "([^)#\\s]*)(#[^)\\s]*)?\\)");
+
 	/**
 	 * A developer article.
 	 *
 	 * @param name
-	 *        The article name (file name without {@code .md}).
+	 *        The article name (path without {@code .md}), the folder path for a chapter.
 	 * @param description
 	 *        When to read the article, from its front matter.
 	 * @param origin
 	 *        The classpath entry contributing the article.
 	 * @param text
 	 *        The Markdown body without front matter.
+	 * @param chapter
+	 *        Whether this is the {@value DocCatalog#CHAPTER_FILE} of a chapter.
+	 * @param order
+	 *        The position in its chapter from the front matter, {@code null} if none is given.
 	 */
-	public record Doc(String name, String description, String origin, String text) {
+	public record Doc(String name, String description, String origin, String text, boolean chapter, Integer order) {
 		// record
 	}
 
@@ -119,12 +143,13 @@ public final class DocCatalog {
 			return;
 		}
 		List<Path> files;
-		try (Stream<Path> stream = Files.list(dir)) {
-			files = stream.filter(f -> f.getFileName().toString().endsWith(DOC_SUFFIX)).sorted().toList();
+		try (Stream<Path> stream = Files.walk(dir)) {
+			files = stream.filter(f -> f.getFileName().toString().endsWith(DOC_SUFFIX) && Files.isRegularFile(f))
+				.sorted().toList();
 		}
 		for (Path file : files) {
-			add(docs, docName(file.getFileName().toString()), entry.toString(),
-				Files.readString(file, StandardCharsets.UTF_8));
+			String path = dir.relativize(file).toString().replace(file.getFileSystem().getSeparator(), "/");
+			add(docs, path, entry.toString(), Files.readString(file, StandardCharsets.UTF_8));
 		}
 	}
 
@@ -135,29 +160,27 @@ public final class DocCatalog {
 			for (Enumeration<? extends ZipEntry> it = zip.entries(); it.hasMoreElements();) {
 				ZipEntry zipEntry = it.nextElement();
 				String path = zipEntry.getName();
-				if (!zipEntry.isDirectory() && path.startsWith(prefix) && path.endsWith(DOC_SUFFIX)
-					&& path.indexOf('/', prefix.length()) < 0) {
+				if (!zipEntry.isDirectory() && path.startsWith(prefix) && path.endsWith(DOC_SUFFIX)) {
 					entries.add(zipEntry);
 				}
 			}
 			entries.sort((a, b) -> a.getName().compareTo(b.getName()));
 			for (ZipEntry zipEntry : entries) {
 				try (InputStream in = zip.getInputStream(zipEntry)) {
-					add(docs, docName(zipEntry.getName().substring(prefix.length())), jar.toString(),
+					add(docs, zipEntry.getName().substring(prefix.length()), jar.toString(),
 						new String(in.readAllBytes(), StandardCharsets.UTF_8));
 				}
 			}
 		}
 	}
 
-	private static String docName(String fileName) {
-		return fileName.substring(0, fileName.length() - DOC_SUFFIX.length());
-	}
-
-	private static void add(Map<String, Doc> docs, String name, String origin, String content) {
+	private static void add(Map<String, Doc> docs, String path, String origin, String content) {
+		boolean chapter = path.equals(CHAPTER_FILE) || path.endsWith("/" + CHAPTER_FILE);
+		String name = chapter ? parentPath(path) : path.substring(0, path.length() - DOC_SUFFIX.length());
 		if (docs.containsKey(name)) {
 			return;
 		}
+		Integer order = null;
 		String description = "";
 		String body = content;
 		List<String> lines = content.lines().toList();
@@ -169,12 +192,49 @@ public final class DocCatalog {
 					break;
 				}
 				int colon = line.indexOf(':');
-				if (colon > 0 && line.substring(0, colon).strip().equals(DESCRIPTION_KEY)) {
-					description = line.substring(colon + 1).strip();
+				if (colon > 0) {
+					String key = line.substring(0, colon).strip();
+					String value = line.substring(colon + 1).strip();
+					if (key.equals(DESCRIPTION_KEY)) {
+						description = value;
+					} else if (key.equals(ORDER_KEY)) {
+						try {
+							order = Integer.valueOf(value);
+						} catch (NumberFormatException ex) {
+							// Not a number: the entry is ordered by its name.
+						}
+					}
 				}
 			}
 		}
-		docs.put(name, new Doc(name, description, origin, body));
+		docs.put(name, new Doc(name, description, origin, body, chapter, order));
+	}
+
+	/** The path of the folder holding the given path, empty for a top-level path. */
+	private static String parentPath(String path) {
+		int separator = path.lastIndexOf('/');
+		return separator < 0 ? "" : path.substring(0, separator);
+	}
+
+	/**
+	 * The article name a link or name denotes: without the {@value #LINK_SCHEME} scheme and
+	 * without a section anchor.
+	 */
+	public static String docName(String link) {
+		String name = link.strip();
+		if (name.startsWith(LINK_SCHEME)) {
+			name = name.substring(LINK_SCHEME.length());
+		}
+		int anchor = name.indexOf('#');
+		return anchor < 0 ? name : name.substring(0, anchor);
+	}
+
+	/**
+	 * The section anchor a link names, {@code null} if it names none.
+	 */
+	public static String linkSection(String link) {
+		int anchor = link.indexOf('#');
+		return anchor < 0 || anchor == link.length() - 1 ? null : link.substring(anchor + 1);
 	}
 
 	/** Whether no article was found. */
@@ -187,9 +247,33 @@ public final class DocCatalog {
 		return _docs.values();
 	}
 
-	/** The article with the given name, or {@code null}. */
+	/**
+	 * The article with the given name, or {@code null}.
+	 *
+	 * @param name
+	 *        An article name, optionally as link with the {@value #LINK_SCHEME} scheme and a section
+	 *        anchor.
+	 */
 	public Doc get(String name) {
-		return _docs.get(name);
+		return _docs.get(docName(name));
+	}
+
+	/**
+	 * The links of the articles to articles the catalog does not contain, each as
+	 * {@code <article>: <link target>}.
+	 */
+	public List<String> brokenLinks() {
+		List<String> result = new ArrayList<>();
+		for (Doc doc : _docs.values()) {
+			Matcher matcher = DOC_LINK.matcher(doc.text());
+			while (matcher.find()) {
+				if (!_docs.containsKey(matcher.group(1))) {
+					result.add(doc.name() + ": " + LINK_SCHEME + matcher.group(1)
+						+ (matcher.group(2) == null ? "" : matcher.group(2)));
+				}
+			}
+		}
+		return result;
 	}
 
 	/**
@@ -288,21 +372,72 @@ public final class DocCatalog {
 	}
 
 	/**
-	 * The article index as Markdown: one line per article with its name and description, for an
-	 * agent session to learn which articles exist.
+	 * The article index as Markdown: one line per article with its name and description, the
+	 * articles of a chapter indented below the chapter, for an agent session to learn which
+	 * articles exist.
 	 */
 	public String index() {
+		Map<String, List<String>> children = new TreeMap<>();
+		for (Doc doc : _docs.values()) {
+			if (!doc.name().isEmpty()) {
+				addEntry(children, doc.name());
+			}
+		}
 		StringBuilder result = new StringBuilder();
 		result.append("TopLogic developer articles available in this workspace ")
-			.append("(read one with the tl-mcp tool read_doc(name[, section])):\n");
-		for (Doc doc : _docs.values()) {
-			result.append("- ").append(doc.name());
-			if (!doc.description().isEmpty()) {
+			.append("(read one with the tl-mcp tool read_doc(name[, section]); a link doc:<name>#<section> ")
+			.append("in an article names another one):\n");
+		appendIndex(result, children, "", 0);
+		return result.toString();
+	}
+
+	private static void addEntry(Map<String, List<String>> children, String name) {
+		String parent = parentPath(name);
+		List<String> siblings = children.computeIfAbsent(parent, x -> new ArrayList<>());
+		if (!siblings.contains(name)) {
+			siblings.add(name);
+			if (!parent.isEmpty()) {
+				addEntry(children, parent);
+			}
+		}
+	}
+
+	private void appendIndex(StringBuilder result, Map<String, List<String>> children, String parent, int depth) {
+		List<String> entries = new ArrayList<>(children.getOrDefault(parent, List.of()));
+		entries.sort((a, b) -> {
+			Integer orderA = order(a);
+			Integer orderB = order(b);
+			if (orderA != null || orderB != null) {
+				if (orderA == null) {
+					return 1;
+				}
+				if (orderB == null) {
+					return -1;
+				}
+				int compare = Integer.compare(orderA, orderB);
+				if (compare != 0) {
+					return compare;
+				}
+			}
+			return a.compareTo(b);
+		});
+		for (String name : entries) {
+			Doc doc = _docs.get(name);
+			result.append("  ".repeat(depth)).append("- ").append(name);
+			if (children.containsKey(name)) {
+				result.append('/');
+			}
+			if (doc != null && !doc.description().isEmpty()) {
 				result.append(" - ").append(doc.description());
 			}
 			result.append('\n');
+			appendIndex(result, children, name, depth + 1);
 		}
-		return result.toString();
+	}
+
+	private Integer order(String name) {
+		Doc doc = _docs.get(name);
+		return doc == null ? null : doc.order();
 	}
 
 	/**

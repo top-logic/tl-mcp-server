@@ -62,12 +62,14 @@ class DocCatalogTest {
 		try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(jar))) {
 			entry(zip, DocCatalog.DOCS_DIR + "/views.md", "---\ndescription: Shadowed.\n---\n# Old\n");
 			entry(zip, DocCatalog.DOCS_DIR + "/access.md", "# Access\n\nNo front matter.\n");
-			entry(zip, DocCatalog.DOCS_DIR + "/nested/ignored.md", "# Ignored\n");
+			entry(zip, DocCatalog.DOCS_DIR + "/chapter/deep.md", "---\norder: 5\n---\n# Deep\n\nSee [views](doc:views#forms) and [gone](doc:missing/article#x).\n");
+			entry(zip, DocCatalog.DOCS_DIR + "/chapter/index.md", "---\ndescription: The chapter.\n---\n# Chapter\n");
 			entry(zip, "META-INF/other.md", "# Ignored\n");
 		}
 
 		DocCatalog catalog = DocCatalog.fromClasspath(List.of(sources, jar, workspace.resolve("missing")));
-		assertEquals(List.of("views", "access"), catalog.docs().stream().map(DocCatalog.Doc::name).toList());
+		assertEquals(List.of("views", "access", "chapter/deep", "chapter"),
+			catalog.docs().stream().map(DocCatalog.Doc::name).toList());
 
 		DocCatalog.Doc views = catalog.get("views");
 		assertEquals("Read before writing a .view.xml.", views.description());
@@ -90,6 +92,14 @@ class DocCatalogTest {
 		String index = catalog.index();
 		assertTrue(index.contains("- views - Read before writing a .view.xml.\n"), index);
 		assertTrue(index.contains("- access\n"), index);
+		assertTrue(index.contains("- chapter/ - The chapter.\n  - chapter/deep\n"), index);
+
+		assertTrue(catalog.get("doc:chapter/deep#x").chapter() == false);
+		assertTrue(catalog.get("chapter").chapter());
+		assertEquals(Integer.valueOf(5), catalog.get("chapter/deep").order());
+		assertEquals("forms", DocCatalog.linkSection("doc:views#forms"));
+		assertNull(DocCatalog.linkSection("doc:views"));
+		assertEquals(List.of("chapter/deep: doc:missing/article#x"), catalog.brokenLinks());
 
 		Path indexFile = workspace.resolve("target/tl-docs-index.md");
 		catalog.writeIndex(indexFile);

@@ -87,9 +87,11 @@ public class ServeMojo extends AbstractMojo {
 		Set<Path> docClasspath = new LinkedHashSet<>();
 		List<MavenProject> projects = _session.getProjects();
 		int failed = 0;
+		Set<Path> reactorOutput = new LinkedHashSet<>();
 		for (MavenProject project : projects) {
 			// A reactor module's own articles are read from its sources, which are newer than its build output.
 			docClasspath.add(Path.of(project.getBuild().getSourceDirectory()));
+			reactorOutput.add(Path.of(project.getBuild().getOutputDirectory()));
 		}
 		for (MavenProject project : projects) {
 			File outputDir = new File(project.getBuild().getOutputDirectory());
@@ -112,7 +114,13 @@ public class ServeMojo extends AbstractMojo {
 				getLog().warn("Skipping classpath of " + project.getId() + ": " + ex.getMessage());
 			}
 		}
-		docClasspath.addAll(resourceClasspath);
+		// The build output of a reactor module may still hold an article whose source was removed
+		// (a build without clean keeps it), so the sources read above are the module's articles.
+		for (Path entry : resourceClasspath) {
+			if (!reactorOutput.contains(entry)) {
+				docClasspath.add(entry);
+			}
+		}
 
 		DocCatalog docs = DocCatalog.fromClasspath(docClasspath);
 		Path indexFile = Path.of(_project.getBuild().getDirectory(), DOC_INDEX_FILE);
