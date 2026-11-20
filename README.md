@@ -57,6 +57,8 @@ target project beforehand to pull those in.
 | `-Dtl-mcp.path=<path>` | `/mcp` | MCP endpoint path for HTTP transport. |
 | `-Dtl-mcp.bodies=<bool>` | `true` | Scan method bodies to populate the call graph, field-access index, and body-level reference kinds (`instantiation`, `cast`, `instanceof`, `catch`, `call_dispatch`, `field_read`, `field_write`). Turning it off cuts startup time by ~2–3× but disables `callers_of`, `field_accessors`, and body kinds in `references_to`. |
 | `-Dtl-mcp.jdk=<bool>` | `false` | Also index the JDK system modules (`jrt:/`). Adds tens of thousands of types and a few seconds to startup. |
+| `-Dtl-mcp.registry=<file>` | unset | Shared mode: serve any number of sessions over a loopback socket announced in `<file>` instead of one session on stdio. See below. |
+| `-Dtl-mcp.idle=<seconds>` | `600` | Shared mode: exit after this long without a session. |
 
 ### Transports
 
@@ -67,6 +69,17 @@ target project beforehand to pull those in.
   `Accept: application/json, text/event-stream`. The server replies with a session
   id in the `Mcp-Session-Id` response header; subsequent requests echo it back via
   `mcp-session-id`.
+
+- **Shared** (`-Dtl-mcp.registry=<file>`): one server serves all agent sessions on
+  the project, so the index is built and held once instead of once per session. The
+  server listens on a random loopback port and writes `port`, `token` and `pid` to
+  `<file>` (readable only by the user). A client connects, sends the line
+  `TL-MCP <token>`, and gets `OK` - from then on the connection carries a
+  newline-delimited JSON-RPC session exactly like stdio - or `STALE`: the reactor's
+  poms, output directories or dependency JARs changed since indexing. A stale server
+  removes its registry file, accepts no new sessions and exits when its running
+  sessions end, so the client starts a fresh one. The TopLogic Claude Code plugin's
+  launcher (`TlMcpServe.java`) implements the client side.
 
 ## Using from Claude Code
 
