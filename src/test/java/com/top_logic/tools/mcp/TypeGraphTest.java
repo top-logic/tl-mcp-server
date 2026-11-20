@@ -97,6 +97,31 @@ class TypeGraphTest {
 	}
 
 	@Test
+	void callers_of_withParameterList_resolvesOverload() {
+		List<TypeGraph.CallerRef> callers = _graph.callersOf(TYPE_GRAPH, "countDistinct(List)", false);
+		assertTrue(callers.stream().anyMatch(c -> "indexBody".equals(c.method())), callers.toString());
+		// indexBody calls countDistinct three times; repeated calls are counted, not listed twice.
+		TypeGraph.CallerRef fromIndexBody =
+			callers.stream().filter(c -> "indexBody".equals(c.method())).findFirst().orElseThrow();
+		assertEquals(3, fromIndexBody.count());
+	}
+
+	@Test
+	void field_writers_findSetter() {
+		List<TypeGraph.AccessorRef> writers = _graph.fieldWriters(TYPE_INFO, "_implementation");
+		assertTrue(writers.stream().anyMatch(w -> "setImplementation".equals(w.method())), writers.toString());
+		List<TypeGraph.AccessorRef> readers = _graph.fieldReaders(TYPE_INFO, "_implementation");
+		assertTrue(readers.stream().anyMatch(r -> "implementation".equals(r.method())), readers.toString());
+	}
+
+	@Test
+	void references_to_excludeSelfReferences() {
+		// TypeGraph calls its own methods; those calls are callers, but no references to the type.
+		TypeGraph.UsageResult r = _graph.referencesTo(TYPE_GRAPH, Set.of(), null, null, 0);
+		assertTrue(r.usages().stream().noneMatch(u -> TYPE_GRAPH.equals(u.ownerType())), r.usages().toString());
+	}
+
+	@Test
 	void show_source_docMode_onClass_returnsHeaderOnly() throws Exception {
 		TypeGraph.SourceResult r = _graph.sourceOf(TYPE_GRAPH, null, TypeGraph.SourceMode.DOC, 0);
 		assertNotNull(r);

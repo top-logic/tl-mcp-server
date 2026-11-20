@@ -6,12 +6,15 @@
 package com.top_logic.tools.mcp;
 
 import java.io.File;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.execution.MavenSession;
@@ -156,6 +159,11 @@ public class ServeMojo extends AbstractMojo {
 			getLog().info("tl-mcp-server: web resource stack has " + resources.rootCount() + " root(s).");
 		}
 
+		// Indexing leaves several times the size of the final index as garbage. Collect it now, so
+		// the JVM can return the heap it grew to while scanning instead of holding it for the whole
+		// session (one server runs per agent session).
+		System.gc();
+
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();
 
 		if (_httpPort > 0) {
@@ -183,7 +191,9 @@ public class ServeMojo extends AbstractMojo {
 	}
 
 	private void runStdio(TypeGraph graph, ResourceBrowser resources, DocCatalog docs, McpJsonMapper jsonMapper) {
-		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
+		CountDownLatch clientGone = new CountDownLatch(1);
+		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper,
+			new EofSignal(System.in, clientGone), System.out);
 		McpSyncServer server = McpServer.sync(transport)
 			.serverInfo("tl-mcp-server", "0.1.0")
 			.instructions(McpTools.INSTRUCTIONS)
@@ -191,9 +201,59 @@ public class ServeMojo extends AbstractMojo {
 			.build();
 		McpTools.registerAll(server, jsonMapper, graph, resources, docs);
 		try {
-			Thread.currentThread().join();
+			clientGone.await();
 		} catch (InterruptedException ex) {
 			Thread.currentThread().interrupt();
+		}
+		getLog().info("tl-mcp-server: client closed stdin, shutting down.");
+		server.closeGracefully();
+	}
+
+	/**
+	 * Releases a latch when the client closes the server's stdin. The stdio transport only ends
+	 * its session then, so without this the server outlives its client: the MCP client (or a
+	 * launcher killed without cleanup) closing the pipe must be enough to end the Maven process.
+	 */
+	private static final class EofSignal extends FilterInputStream {
+
+		private final CountDownLatch _eof;
+
+		EofSignal(InputStream in, CountDownLatch eof) {
+			super(in);
+			_eof = eof;
+		}
+
+		@Override
+		public int read() throws IOException {
+			try {
+				return signal(super.read());
+			} catch (IOException ex) {
+				_eof.countDown();
+				throw ex;
+			}
+		}
+
+		@Override
+		public int read(byte[] b, int off, int len) throws IOException {
+			try {
+				return signal(super.read(b, off, len));
+			} catch (IOException ex) {
+				_eof.countDown();
+				throw ex;
+			}
+		}
+
+		private int signal(int result) {
+			if (result < 0) {
+				_eof.countDown();
+			}
+			return result;
+		}
+
+		@Override
+		public void close() throws IOException {
+			_eof.countDown();
+			super.close();
 		}
 	}
 

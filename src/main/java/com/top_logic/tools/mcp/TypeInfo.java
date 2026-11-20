@@ -146,6 +146,14 @@ public final class TypeInfo {
 		final List<FieldInfo> fields = new ArrayList<>();
 		String configuration;
 
+		/**
+		 * Method-body data, handed to the {@link BytecodeScanner.BodySink} once this type is
+		 * accepted into the index and then dropped: it is only needed to build the reverse indexes
+		 * of {@link TypeGraph}, so keeping it on {@link TypeInfo} would hold the whole call graph
+		 * in memory twice.
+		 */
+		final List<MethodBody> bodies = new ArrayList<>();
+
 		TypeInfo build() {
 			return new TypeInfo(this);
 		}
@@ -182,10 +190,6 @@ public final class TypeInfo {
 			List<Parameter> parameters,
 			List<String> exceptions,
 			List<AnnotationInfo> annotations,
-			List<CallSite> calls,
-			List<FieldAccess> fieldAccesses,
-			List<String> stringLiterals,
-			List<BodyTypeRef> bodyTypeRefs,
 			int startLine,
 			int endLine) {
 
@@ -208,6 +212,18 @@ public final class TypeInfo {
 		public boolean isStatic() { return (access & Opcodes.ACC_STATIC) != 0; }
 		public boolean isFinal() { return (access & Opcodes.ACC_FINAL) != 0; }
 		public boolean isEnumConstant() { return (access & Opcodes.ACC_ENUM) != 0; }
+	}
+
+	/**
+	 * References captured from the body of one method: transient scan output consumed by
+	 * {@link TypeGraph} while it builds its call-graph and usage indexes.
+	 */
+	public record MethodBody(
+			String name,
+			String descriptor,
+			List<CallSite> calls,
+			List<FieldAccess> fieldAccesses,
+			List<BodyTypeRef> bodyTypeRefs) {
 	}
 
 	/** One invocation site captured from a method body. */
