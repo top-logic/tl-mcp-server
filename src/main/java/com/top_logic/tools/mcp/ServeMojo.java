@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.execution.MavenSession;
@@ -75,6 +76,18 @@ public class ServeMojo extends AbstractMojo {
 	@Parameter(property = "tl-mcp.jdk", defaultValue = "false")
 	private boolean _includeJdk;
 
+	/**
+	 * Registry file of a shared server. When set, the server does not talk on stdio but serves
+	 * any number of sessions over a loopback socket announced in this file; see
+	 * {@link SharedServer}.
+	 */
+	@Parameter(property = "tl-mcp.registry")
+	private File _registry;
+
+	/** Seconds a shared server stays up without any session. */
+	@Parameter(property = "tl-mcp.idle", defaultValue = "600")
+	private int _idleSeconds;
+
 	/** Scan method bodies for call/field-access/literal information. */
 	@Parameter(property = "tl-mcp.bodies", defaultValue = "true")
 	private boolean _scanBodies;
@@ -86,15 +99,23 @@ public class ServeMojo extends AbstractMojo {
 		Set<Path> resourceClasspath = new LinkedHashSet<>();
 		Set<Path> docClasspath = new LinkedHashSet<>();
 		List<MavenProject> projects = _session.getProjects();
+		List<File> inputs = new ArrayList<>();
 		int failed = 0;
 		Set<Path> reactorOutput = new LinkedHashSet<>();
 		for (MavenProject project : projects) {
 			// A reactor module's own articles are read from its sources, which are newer than its build output.
 			docClasspath.add(Path.of(project.getBuild().getSourceDirectory()));
+			// Editing an article must make a shared server stale, like recompiling does.
+			inputs.add(new File(project.getBuild().getSourceDirectory(), DocCatalog.DOCS_DIR));
 			reactorOutput.add(Path.of(project.getBuild().getOutputDirectory()));
 		}
 		for (MavenProject project : projects) {
+			if (project.getFile() != null) {
+				inputs.add(project.getFile());
+			}
 			File outputDir = new File(project.getBuild().getOutputDirectory());
+			// Also when missing: compiling the module later must make a shared server stale.
+			inputs.add(outputDir);
 			resourceClasspath.add(outputDir.toPath());
 			if (outputDir.isDirectory() && addOnce(seen, outputDir)) {
 				File sourceDir = new File(project.getBuild().getSourceDirectory());
@@ -131,6 +152,10 @@ public class ServeMojo extends AbstractMojo {
 		}
 		getLog().info("tl-mcp-server: " + docs.docs().size() + " developer article(s), index in " + indexFile + ".");
 
+		for (BytecodeScanner.Source source : classpath) {
+			inputs.add(source.file());
+		}
+
 		TypeGraph graph;
 		try {
 			graph = TypeGraph.load(classpath, _includeJdk, _scanBodies);
@@ -156,12 +181,42 @@ public class ServeMojo extends AbstractMojo {
 			getLog().info("tl-mcp-server: web resource stack has " + resources.rootCount() + " root(s).");
 		}
 
+		// Indexing leaves several times the size of the final index as garbage. Collect it now, so
+		// the JVM can return the heap it grew to while scanning instead of holding it for the whole
+		// session (one server runs per agent session).
+		System.gc();
+
 		McpJsonMapper jsonMapper = McpJsonDefaults.getMapper();
 
-		if (_httpPort > 0) {
+		if (_registry != null) {
+			runShared(graph, resources, docs, jsonMapper, inputs);
+		} else if (_httpPort > 0) {
 			runHttp(graph, resources, docs, jsonMapper);
 		} else {
 			runStdio(graph, resources, docs, jsonMapper);
+		}
+	}
+
+	private static McpSyncServer newServer(McpServer.SyncSpecification<?> spec, TypeGraph graph,
+			ResourceBrowser resources, DocCatalog docs, McpJsonMapper jsonMapper) {
+		McpSyncServer server = spec
+			.serverInfo("tl-mcp-server", "0.1.0")
+			.instructions(McpTools.INSTRUCTIONS)
+			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
+			.build();
+		McpTools.registerAll(server, jsonMapper, graph, resources, docs);
+		return server;
+	}
+
+	private void runShared(TypeGraph graph, ResourceBrowser resources, DocCatalog docs, McpJsonMapper jsonMapper,
+			List<File> inputs) throws MojoExecutionException {
+		SharedServer shared = new SharedServer(_registry.toPath(), _idleSeconds * 1000L,
+			() -> ClasspathFingerprint.of(inputs), jsonMapper,
+			transport -> newServer(McpServer.sync(transport), graph, resources, docs, jsonMapper), getLog());
+		try {
+			shared.run();
+		} catch (IOException ex) {
+			throw new MojoExecutionException("Shared server failed.", ex);
 		}
 	}
 
@@ -183,18 +238,17 @@ public class ServeMojo extends AbstractMojo {
 	}
 
 	private void runStdio(TypeGraph graph, ResourceBrowser resources, DocCatalog docs, McpJsonMapper jsonMapper) {
-		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
-		McpSyncServer server = McpServer.sync(transport)
-			.serverInfo("tl-mcp-server", "0.1.0")
-			.instructions(McpTools.INSTRUCTIONS)
-			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
-			.build();
-		McpTools.registerAll(server, jsonMapper, graph, resources, docs);
+		CountDownLatch clientGone = new CountDownLatch(1);
+		StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper,
+			new EofSignal(System.in, clientGone), System.out);
+		McpSyncServer server = newServer(McpServer.sync(transport), graph, resources, docs, jsonMapper);
 		try {
-			Thread.currentThread().join();
+			clientGone.await();
 		} catch (InterruptedException ex) {
 			Thread.currentThread().interrupt();
 		}
+		getLog().info("tl-mcp-server: client closed stdin, shutting down.");
+		server.closeGracefully();
 	}
 
 	private void runHttp(TypeGraph graph, ResourceBrowser resources, DocCatalog docs, McpJsonMapper jsonMapper)
@@ -204,12 +258,7 @@ public class ServeMojo extends AbstractMojo {
 				.jsonMapper(jsonMapper)
 				.mcpEndpoint(_httpPath)
 				.build();
-		McpSyncServer server = McpServer.sync(transport)
-			.serverInfo("tl-mcp-server", "0.1.0")
-			.instructions(McpTools.INSTRUCTIONS)
-			.capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
-			.build();
-		McpTools.registerAll(server, jsonMapper, graph, resources, docs);
+		newServer(McpServer.sync(transport), graph, resources, docs, jsonMapper);
 
 		Server jetty = new Server();
 		ServerConnector connector = new ServerConnector(jetty);

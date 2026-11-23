@@ -26,6 +26,7 @@ import com.top_logic.tools.mcp.TypeInfo.BodyTypeRef;
 import com.top_logic.tools.mcp.TypeInfo.CallSite;
 import com.top_logic.tools.mcp.TypeInfo.FieldAccess;
 import com.top_logic.tools.mcp.TypeInfo.FieldInfo;
+import com.top_logic.tools.mcp.TypeInfo.MethodBody;
 import com.top_logic.tools.mcp.TypeInfo.MethodInfo;
 import com.top_logic.tools.mcp.TypeInfo.Parameter;
 
@@ -35,7 +36,7 @@ import com.top_logic.tools.mcp.TypeInfo.Parameter;
  */
 public class TypeGraph {
 
-	private final Map<String, TypeInfo> _types;
+	private Map<String, TypeInfo> _types = Map.of();
 
 	/** supertype FQN → direct subtype FQNs (covers both superclass and super-interface relations). */
 	private final Map<String, List<String>> _specializations = new HashMap<>();
@@ -43,20 +44,17 @@ public class TypeGraph {
 	/** annotation FQN → types carrying it at the class level. */
 	private final Map<String, List<String>> _annotated = new HashMap<>();
 
-	/** referenced FQN → structured usage sites (Eclipse "Search Java" style). */
+	/**
+	 * referenced FQN → structured usage sites (Eclipse "Search Java" style). Body-level usages
+	 * also answer {@link #callersOf} ({@link UsageKind#CALL_DISPATCH}) and {@link #fieldReaders} /
+	 * {@link #fieldWriters}, so the call graph is held only once. Unlike declaration-level ones,
+	 * body-level usages are kept when a type references itself (a call of its own method is
+	 * still a caller); {@link #referencesTo} filters those out.
+	 */
 	private final Map<String, List<Usage>> _referencedBy = new HashMap<>();
 
 	/** moduleId → types in that module. */
 	private final Map<String, List<String>> _byModule = new HashMap<>();
-
-	/** "owner#name#descriptor" → callers (FQN of caller type + caller method name + descriptor). */
-	private final Map<String, List<CallerRef>> _callers = new HashMap<>();
-
-	/** "owner#name" → readers (caller type + caller method). */
-	private final Map<String, List<AccessorRef>> _fieldReaders = new HashMap<>();
-
-	/** "owner#name" → writers. */
-	private final Map<String, List<AccessorRef>> _fieldWriters = new HashMap<>();
 
 	public record CallerRef(String ownerType, String method, String descriptor, int count) {
 	}
@@ -75,7 +73,7 @@ public class TypeGraph {
 		METHOD_PARAMETER,
 		METHOD_EXCEPTION,
 		METHOD_ANNOTATION,
-		// Body-level (require body scan)
+		// Body-level (require body scan). Keep them last: isBodyKind() compares ordinals.
 		INSTANTIATION,
 		CAST,
 		INSTANCEOF,
@@ -101,7 +99,12 @@ public class TypeGraph {
 			int count) {
 	}
 
-	private TypeGraph(Map<String, TypeInfo> types) {
+	private TypeGraph() {
+		// Filled by load().
+	}
+
+	/** Builds the declaration-level indexes; body-level ones are filled by {@link #indexBody}. */
+	private void indexDeclarations(Map<String, TypeInfo> types) {
 		_types = types;
 		for (TypeInfo info : types.values()) {
 			for (String supertype : info.supertypes()) {
@@ -114,7 +117,17 @@ public class TypeGraph {
 				_byModule.computeIfAbsent(info.moduleId(), k -> new ArrayList<>()).add(info.name());
 			}
 			collectReferences(info);
-			indexBodies(info);
+		}
+		trim(_specializations);
+		trim(_annotated);
+		trim(_referencedBy);
+		trim(_byModule);
+	}
+
+	/** Releases the spare capacity growing the index lists left behind. */
+	private static void trim(Map<String, ? extends List<?>> index) {
+		for (List<?> list : index.values()) {
+			((ArrayList<?>) list).trimToSize();
 		}
 	}
 
@@ -146,45 +159,54 @@ public class TypeGraph {
 		}
 	}
 
-	private void indexBodies(TypeInfo info) {
-		String owner = info.name();
-		for (MethodInfo m : info.methods()) {
-			String mName = m.name(), mDesc = m.descriptor();
-			for (CallSite call : m.calls()) {
-				addTypedUsage(call.owner(), new Usage(owner, mName, mDesc,
-					call.name(), call.descriptor(), UsageKind.CALL_DISPATCH, 1));
-				String key = call.owner() + "#" + call.name() + "#" + call.descriptor();
-				_callers.computeIfAbsent(key, k -> new ArrayList<>())
-					.add(new CallerRef(owner, mName, mDesc, 1));
-			}
-			for (FieldAccess fa : m.fieldAccesses()) {
-				UsageKind uk = fa.write() ? UsageKind.FIELD_WRITE : UsageKind.FIELD_READ;
-				addTypedUsage(fa.owner(), new Usage(owner, mName, mDesc,
-					fa.name(), fa.descriptor(), uk, 1));
-				String key = fa.owner() + "#" + fa.name();
-				AccessorRef ref = new AccessorRef(owner, mName, mDesc, 1);
-				if (fa.write()) {
-					_fieldWriters.computeIfAbsent(key, k -> new ArrayList<>()).add(ref);
-				} else {
-					_fieldReaders.computeIfAbsent(key, k -> new ArrayList<>()).add(ref);
-				}
-			}
-			for (BodyTypeRef btr : m.bodyTypeRefs()) {
-				UsageKind uk = switch (btr.kind()) {
-					case INSTANTIATION -> UsageKind.INSTANTIATION;
-					case CAST -> UsageKind.CAST;
-					case INSTANCEOF -> UsageKind.INSTANCEOF;
-					case CATCH -> UsageKind.CATCH;
-				};
-				addTypedUsage(btr.type(), new Usage(owner, mName, mDesc, null, null, uk, 1));
-			}
+	/**
+	 * Indexes the body of one method of {@code owner}. Repeated references from the same method
+	 * (e.g. ten calls of {@code List.add}) are stored once with a count.
+	 */
+	private void indexBody(String owner, MethodBody body) {
+		String mName = body.name(), mDesc = body.descriptor();
+		for (Map.Entry<CallSite, Integer> e : countDistinct(body.calls()).entrySet()) {
+			CallSite call = e.getKey();
+			int n = e.getValue();
+			addTypedUsage(call.owner(), new Usage(owner, mName, mDesc,
+				call.name(), call.descriptor(), UsageKind.CALL_DISPATCH, n));
 		}
+		for (Map.Entry<FieldAccess, Integer> e : countDistinct(body.fieldAccesses()).entrySet()) {
+			FieldAccess fa = e.getKey();
+			int n = e.getValue();
+			UsageKind uk = fa.write() ? UsageKind.FIELD_WRITE : UsageKind.FIELD_READ;
+			addTypedUsage(fa.owner(), new Usage(owner, mName, mDesc,
+				fa.name(), fa.descriptor(), uk, n));
+		}
+		for (Map.Entry<BodyTypeRef, Integer> e : countDistinct(body.bodyTypeRefs()).entrySet()) {
+			BodyTypeRef btr = e.getKey();
+			UsageKind uk = switch (btr.kind()) {
+				case INSTANTIATION -> UsageKind.INSTANTIATION;
+				case CAST -> UsageKind.CAST;
+				case INSTANCEOF -> UsageKind.INSTANCEOF;
+				case CATCH -> UsageKind.CATCH;
+			};
+			addTypedUsage(btr.type(), new Usage(owner, mName, mDesc, null, null, uk, e.getValue()));
+		}
+	}
+
+	/** Occurrence count of each distinct element, in first-occurrence order. */
+	private static <T> Map<T, Integer> countDistinct(List<T> items) {
+		Map<T, Integer> counts = new LinkedHashMap<>();
+		for (T item : items) {
+			counts.merge(item, 1, Integer::sum);
+		}
+		return counts;
 	}
 
 	private void addUsage(String target, Usage usage) {
 		if (target == null || target.isEmpty()) return;
-		if (target.equals(usage.ownerType())) return;
-		_referencedBy.computeIfAbsent(target, k -> new ArrayList<>()).add(usage);
+		if (target.equals(usage.ownerType()) && !isBodyKind(usage.kind())) return;
+		_referencedBy.computeIfAbsent(target, k -> new ArrayList<>(1)).add(usage);
+	}
+
+	private static boolean isBodyKind(UsageKind kind) {
+		return kind.compareTo(UsageKind.INSTANTIATION) >= 0;
 	}
 
 	/** Strips array brackets / primitives before indexing. */
@@ -207,8 +229,10 @@ public class TypeGraph {
 
 	public static TypeGraph load(List<BytecodeScanner.Source> classpath, boolean includeJdk, boolean scanBodies)
 			throws IOException {
-		Map<String, TypeInfo> types = BytecodeScanner.scan(classpath, includeJdk, scanBodies);
-		return new TypeGraph(types);
+		TypeGraph graph = new TypeGraph();
+		Map<String, TypeInfo> types = BytecodeScanner.scan(classpath, includeJdk, scanBodies, graph::indexBody);
+		graph.indexDeclarations(types);
+		return graph;
 	}
 
 	public int size() { return _types.size(); }
@@ -329,6 +353,7 @@ public class TypeGraph {
 		Map<String, Usage> firstSeen = new LinkedHashMap<>();
 		Map<UsageKind, Integer> byKind = new LinkedHashMap<>();
 		for (Usage u : all) {
+			if (u.ownerType().equals(fqn)) continue;
 			if (filterKinds && !kinds.contains(u.kind())) continue;
 			if (pattern != null && !pattern.matcher(u.ownerType()).find()) continue;
 			if (filterModule) {
@@ -405,73 +430,49 @@ public class TypeGraph {
 			}
 		}
 
-		List<CallerRef> raw = new ArrayList<>();
+		Integer arity = spec.paramTypes() == null ? null : spec.paramTypes().size();
+		Map<List<String>, Integer> counts = new LinkedHashMap<>();
 		for (String o : owners) {
-			if (resolvedDescriptor != null) {
-				List<CallerRef> direct = _callers.get(o + "#" + spec.name() + "#" + resolvedDescriptor);
-				if (direct != null) raw.addAll(direct);
-			} else {
-				String prefix = o + "#" + spec.name() + "#";
-				for (Map.Entry<String, List<CallerRef>> e : _callers.entrySet()) {
-					if (!e.getKey().startsWith(prefix)) continue;
-					if (spec.paramTypes() != null && !paramCountOfDescriptor(e.getKey(), prefix.length())
-							.equals(spec.paramTypes().size())) {
-						continue;
-					}
-					raw.addAll(e.getValue());
+			for (Usage u : bodyUsages(o, UsageKind.CALL_DISPATCH, spec.name())) {
+				if (resolvedDescriptor != null) {
+					if (!resolvedDescriptor.equals(u.targetDescriptor())) continue;
+				} else if (arity != null
+					&& org.objectweb.asm.Type.getArgumentTypes(u.targetDescriptor()).length != arity) {
+					continue;
 				}
+				counts.merge(List.of(u.ownerType(), u.member(), u.descriptor()), u.count(), Integer::sum);
 			}
-		}
-		return raw.isEmpty() ? List.of() : aggregateCallers(raw);
-	}
-
-	/** Returns the arity of the method descriptor starting at {@code from} in {@code key}. */
-	private static Integer paramCountOfDescriptor(String key, int from) {
-		String desc = key.substring(from);
-		return org.objectweb.asm.Type.getArgumentTypes(desc).length;
-	}
-
-	public List<AccessorRef> fieldReaders(String owner, String field) {
-		List<AccessorRef> r = _fieldReaders.get(owner + "#" + field);
-		return r == null ? List.of() : aggregateAccessors(r);
-	}
-
-	public List<AccessorRef> fieldWriters(String owner, String field) {
-		List<AccessorRef> r = _fieldWriters.get(owner + "#" + field);
-		return r == null ? List.of() : aggregateAccessors(r);
-	}
-
-	private static List<CallerRef> aggregateCallers(List<CallerRef> raw) {
-		Map<String, int[]> counts = new LinkedHashMap<>();
-		for (CallerRef c : raw) {
-			counts.computeIfAbsent(c.ownerType() + "\0" + c.method() + "\0" + c.descriptor(),
-				k -> new int[1])[0] += c.count();
 		}
 		List<CallerRef> out = new ArrayList<>(counts.size());
-		// Iterate raw once to preserve first-occurrence order, skipping already-emitted identities.
-		Set<String> seen = new HashSet<>();
-		for (CallerRef c : raw) {
-			String key = c.ownerType() + "\0" + c.method() + "\0" + c.descriptor();
-			if (seen.add(key)) {
-				out.add(new CallerRef(c.ownerType(), c.method(), c.descriptor(), counts.get(key)[0]));
-			}
-		}
+		counts.forEach((k, n) -> out.add(new CallerRef(k.get(0), k.get(1), k.get(2), n)));
 		return out;
 	}
 
-	private static List<AccessorRef> aggregateAccessors(List<AccessorRef> raw) {
-		Map<String, int[]> counts = new LinkedHashMap<>();
-		for (AccessorRef a : raw) {
-			counts.computeIfAbsent(a.ownerType() + "\0" + a.method() + "\0" + a.descriptor(),
-				k -> new int[1])[0] += a.count();
+	public List<AccessorRef> fieldReaders(String owner, String field) {
+		return fieldAccessors(owner, field, UsageKind.FIELD_READ);
+	}
+
+	public List<AccessorRef> fieldWriters(String owner, String field) {
+		return fieldAccessors(owner, field, UsageKind.FIELD_WRITE);
+	}
+
+	private List<AccessorRef> fieldAccessors(String owner, String field, UsageKind kind) {
+		Map<List<String>, Integer> counts = new LinkedHashMap<>();
+		for (Usage u : bodyUsages(owner, kind, field)) {
+			counts.merge(List.of(u.ownerType(), u.member(), u.descriptor()), u.count(), Integer::sum);
 		}
 		List<AccessorRef> out = new ArrayList<>(counts.size());
-		Set<String> seen = new HashSet<>();
-		for (AccessorRef a : raw) {
-			String key = a.ownerType() + "\0" + a.method() + "\0" + a.descriptor();
-			if (seen.add(key)) {
-				out.add(new AccessorRef(a.ownerType(), a.method(), a.descriptor(), counts.get(key)[0]));
-			}
+		counts.forEach((k, n) -> out.add(new AccessorRef(k.get(0), k.get(1), k.get(2), n)));
+		return out;
+	}
+
+	/** Body-level usages of {@code target} of the given kind that touch the member {@code memberName}. */
+	private List<Usage> bodyUsages(String target, UsageKind kind, String memberName) {
+		List<Usage> all = _referencedBy.get(target);
+		if (all == null) return List.of();
+		List<Usage> out = new ArrayList<>();
+		for (Usage u : all) {
+			if (u.kind() == kind && memberName.equals(u.targetMember())) out.add(u);
 		}
 		return out;
 	}

@@ -102,7 +102,7 @@ class MemberSpecTest {
 		List<TypeInfo.Parameter> params = new java.util.ArrayList<>();
 		for (String type : paramTypes) params.add(new TypeInfo.Parameter(null, type));
 		return new TypeInfo.MethodInfo(name, "()V", 1, "void", params, List.of(), List.of(),
-			List.of(), List.of(), List.of(), List.of(), -1, -1);
+			-1, -1);
 	}
 
 }
